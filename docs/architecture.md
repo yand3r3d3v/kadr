@@ -274,7 +274,7 @@ In `cut`, `gif` and `frame` a frame of the video is drawn to the left of the fie
 - One worker thread serves the requests, "latest wins": while an arrow key is held, the frames in between are never fetched. The worker also encodes the frame for the terminal, so the drawing thread only blits.
 - The last 48 frames are cached, keyed by time and size, so going back is instant.
 - Drawing is [ratatui-image](https://docs.rs/ratatui-image). At start it asks the terminal which protocol it speaks (kitty, iTerm2, sixel) and falls back to half blocks. That query reads the answer from stdin, so it runs before the input thread starts. It needs no system library, unlike chafa.
-- The preview takes what the window can spare: up to 12 rows, none at all under 22 rows. The form works the same without it.
+- The preview takes what the window can spare: up to 12 rows, and the form needs 16 of the window's rows for everything else. A tall video, such as one filmed on a phone, gets a narrow frame in a small window instead of none; below 8 cells wide there is nothing worth drawing. The form works the same without it.
 - `KADR_PREVIEW=off` switches it off.
 
 In `cut` the form has a `cursor` field: a time that is not part of the command. Move it to look around, then `i` makes it the start and `o` the end. `start` and `cursor` are shared between tabs, so a moment found in `cut` is there in `gif` and `frame`.
@@ -291,7 +291,7 @@ In a narrow window a longer language must not push `esc` off the key bar, so the
 
 - **The form has an `output` field.** The "file exists" screen offered to change the name and there was nowhere to change it.
 - **The cursor is a field.** On the canvas the arrows move a cursor on the timeline. In the code `cursor` is a row of the form like `start` and `end`, and the arrows move whichever of the three is in focus.
-- **The preview is smaller than drawn** in a small window, and absent in a very small one.
+- **The preview is smaller than drawn** in a small window.
 - **Seven tabs, not four**, and `convert`, `speed` and `frame` have no artboards.
 - **`--help` is clap's standard help**, not the layout drawn on the canvas.
 - **The picker has no path completion on `tab`.** Folders open with `enter`.

@@ -131,15 +131,18 @@ impl Preview {
 /// video of the given aspect ratio. `None` when there is no room for one.
 pub fn size(term: (u16, u16), aspect: f64) -> Option<(u16, u16)> {
     let (w, h) = (term.0.saturating_sub(4), term.1);
-    // Header, a caption under the frame, the note, the command, the ruler
-    // and the keys take seventeen rows.
-    let rows = h.saturating_sub(17).min(12);
+    // Above the frame: the margin and the header. Below it: its caption, the
+    // note, the command (up to three lines in its box), a gap, the timeline
+    // with its labels, and the margin. That is sixteen rows of everything
+    // else, so the frame gets what is left, up to twelve.
+    let rows = h.saturating_sub(16).min(12);
     if rows < 5 || aspect <= 0.0 {
         return None;
     }
     // A cell is about twice as tall as it is wide.
     let cols = ((rows as f64 * 2.0 * aspect).round() as u16).min(w / 2);
-    (cols >= 12).then_some((cols, rows))
+    // Narrow is fine for a tall video; narrower than this shows nothing.
+    (cols >= 8).then_some((cols, rows))
 }
 
 #[cfg(test)]
@@ -148,10 +151,17 @@ mod tests {
 
     #[test]
     fn the_preview_grows_with_the_window_and_keeps_room_for_the_form() {
-        assert_eq!(size((80, 24), 16.0 / 9.0), Some((25, 7)));
+        assert_eq!(size((80, 24), 16.0 / 9.0), Some((28, 8)));
         assert_eq!(size((120, 40), 16.0 / 9.0), Some((43, 12)));
         assert_eq!(size((80, 20), 16.0 / 9.0), None);
         // A wide video is capped at half the width.
         assert_eq!(size((80, 30), 4.0), Some((38, 12)));
+    }
+
+    #[test]
+    fn a_tall_video_gets_a_narrow_frame_instead_of_none() {
+        // A phone video, 1440x2560, in a window of 24 rows.
+        assert_eq!(size((100, 24), 1440.0 / 2560.0), Some((9, 8)));
+        assert_eq!(size((100, 30), 1440.0 / 2560.0), Some((14, 12)));
     }
 }
