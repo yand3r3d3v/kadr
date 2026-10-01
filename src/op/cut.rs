@@ -1,26 +1,17 @@
 use super::*;
-use crate::util::{fmt_clock, fmt_ts};
+use crate::util::fmt_ts;
 
-const TIME_HINT: &str = "←→ 1 s, ⇧←→ 10 s, , . one frame";
+pub const TIME_HINT: &str = "←→ 1 s, ⇧←→ 10 s, , . one frame";
+
+pub fn time_field(id: FieldId, label: &'static str, t: f64, hint: &'static str) -> FieldSpec {
+    FieldSpec { id, label, kind: Kind::Time, value: fmt_ts(t), hint, enabled: true }
+}
 
 pub fn fields(v: &Values, _info: &MediaInfo) -> Vec<FieldSpec> {
     vec![
-        FieldSpec {
-            id: FieldId::Start,
-            label: "start",
-            kind: Kind::Time,
-            value: fmt_ts(v.start),
-            hint: TIME_HINT,
-            enabled: true,
-        },
-        FieldSpec {
-            id: FieldId::End,
-            label: "end",
-            kind: Kind::Time,
-            value: fmt_ts(v.end),
-            hint: TIME_HINT,
-            enabled: true,
-        },
+        time_field(FieldId::Cursor, "cursor", v.cursor, "look around, then i sets the start, o the end"),
+        time_field(FieldId::Start, "start", v.start, TIME_HINT),
+        time_field(FieldId::End, "end", v.end, TIME_HINT),
         FieldSpec {
             id: FieldId::Length,
             label: "length",
@@ -29,24 +20,15 @@ pub fn fields(v: &Values, _info: &MediaInfo) -> Vec<FieldSpec> {
             hint: "",
             enabled: true,
         },
-        FieldSpec {
-            id: FieldId::Mode,
-            label: "mode",
-            kind: Kind::Choice {
-                items: vec![
-                    Choice {
-                        label: "fast".into(),
-                        hint: "copies the stream; the start snaps back to a keyframe",
-                    },
-                    Choice { label: "exact".into(), hint: "re-encodes, cuts clean" },
-                ],
-                selected: v.mode,
-                inline: true,
-            },
-            value: if v.mode == MODE_EXACT { "exact" } else { "fast" }.into(),
-            hint: "",
-            enabled: true,
-        },
+        inline(
+            FieldId::Mode,
+            "mode",
+            &[
+                ("fast", "copies the stream; starts on a keyframe"),
+                ("exact", "re-encodes, cuts clean"),
+            ],
+            v.mode,
+        ),
     ]
 }
 
@@ -65,7 +47,12 @@ pub fn build(v: &Values, info: &MediaInfo) -> CommandLine {
     } else {
         b.flag("-c", mode).value("copy", FieldId::Mode);
     }
-    b.output(output_parts(OpKind::Cut, v, info, None))
+    b.output(OpKind::Cut, v, info)
+}
+
+pub fn output(v: &Values, info: &MediaInfo) -> Vec<Part> {
+    let ext = if v.mode == MODE_EXACT { "mp4".to_string() } else { source_ext(info) };
+    vec![sibling(info, format!("{}_cut.{ext}", stem(info)))]
 }
 
 /// A stream copy always begins at a keyframe. In mp4 and mov ffmpeg writes an
@@ -81,16 +68,10 @@ pub fn hides_preroll(v: &Values, info: &MediaInfo) -> bool {
 pub fn check(v: &Values, info: &MediaInfo) -> Vec<Problem> {
     let mut problems = vec![];
     if v.end <= v.start {
-        problems.push(Problem {
-            field: Some(FieldId::End),
-            text: "The end must come after the start.".into(),
-        });
+        problems.push(Problem::new(FieldId::End, "The end must come after the start."));
     }
     if v.end > info.duration + 0.05 {
-        problems.push(Problem {
-            field: Some(FieldId::End),
-            text: format!("The end is past the end of the file ({}).", fmt_clock(info.duration)),
-        });
+        problems.push(Problem::new(FieldId::End, "The end is past the end of the file."));
     }
     problems
 }
@@ -129,6 +110,14 @@ mod tests {
     }
 
     #[test]
+    fn the_cursor_is_not_part_of_the_command() {
+        let (info, mut v) = piece();
+        let before = shell(&build(&v, &info));
+        v.cursor = 50.0;
+        assert_eq!(shell(&build(&v, &info)), before);
+    }
+
+    #[test]
     fn end_before_start_is_a_problem() {
         let (info, mut v) = piece();
         v.end = 10.0;
@@ -139,5 +128,13 @@ mod tests {
     fn progress_counts_the_piece() {
         let (info, v) = piece();
         assert_eq!(result_duration(OpKind::Cut, &v, &info), 34.0);
+    }
+
+    #[test]
+    fn mp4_family_hides_the_preroll() {
+        let (mut info, v) = piece();
+        assert!(hides_preroll(&v, &info));
+        info.path = "lecture_04.mkv".into();
+        assert!(!hides_preroll(&v, &info));
     }
 }

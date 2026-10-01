@@ -45,7 +45,7 @@ pub fn run(op: OpKind, v: &Values, info: &MediaInfo) -> Result<ExitCode> {
     };
 
     if let Some(p) = op::check(op, v, info).into_iter().next() {
-        return fail(p.text);
+        return fail(p.english());
     }
     let output = op::output_path(op, v, info);
     let name = output.to_string_lossy().into_owned();

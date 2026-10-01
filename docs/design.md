@@ -66,7 +66,7 @@ Labels and tabs are lowercase. Messages are ordinary sentences. Short verbs, no 
 - Success: `✓ Done: lecture_04_small.mp4`, then before and after: `48 MB`, `12 MB`, `75% smaller`.
 - Error: `lecture_04_small.mp4 already exists. Press o to overwrite it, or change the name.`
 
-The interface is English first. A second language, Russian, is chosen inside the program. Operation and option names in the shell stay English in any language.
+The interface is English first. A second language, Russian, is chosen inside the program: `?`, then `tab`. Operation and option names in the shell stay English in any language, and so does the ffmpeg command.
 
 ## Screens
 

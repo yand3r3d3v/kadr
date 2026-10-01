@@ -1,11 +1,14 @@
 mod app;
 mod cli;
 mod command;
+mod config;
 mod op;
 mod picker;
 mod plain;
+mod preview;
 mod probe;
 mod run;
+mod text;
 mod theme;
 mod ui;
 mod util;
@@ -34,6 +37,7 @@ fn real_main() -> Result<ExitCode> {
         }
     }
 
+    let config = config::load();
     let info = launch.file.as_deref().map(probe::probe).transpose()?;
     if let (Some(op), Some(info)) = (launch.op, &info)
         && !op.available(info) {
@@ -46,7 +50,8 @@ fn real_main() -> Result<ExitCode> {
             bail!("--print and --run need an operation: kadr compress FILE --print");
         };
         let mut values = Values::defaults(info);
-        cli::apply(&launch.prefill, &mut values, info)?;
+        cli::apply(&config.defaults, &mut values, info, false)?;
+        cli::apply(&launch.prefill, &mut values, info, true)?;
         values.overwrite = launch.global.yes;
         return if launch.global.print {
             Ok(plain::print(op, &values, info))
@@ -55,7 +60,7 @@ fn real_main() -> Result<ExitCode> {
         };
     }
 
-    app::run(app::Start { op: launch.op, info, prefill: launch.prefill })?;
+    app::run(app::Start { op: launch.op, info, prefill: launch.prefill, config })?;
     Ok(ExitCode::SUCCESS)
 }
 

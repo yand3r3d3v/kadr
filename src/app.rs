@@ -11,12 +11,17 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui_image::picker::Picker as GraphicsPicker;
+use ratatui_image::protocol::Protocol;
 
 use crate::cli::{self, Prefill};
+use crate::config::{self, Config};
 use crate::op::{self, CommandLine, FieldId, FieldSpec, Kind, OpKind, Values};
 use crate::picker::Picker;
+use crate::preview::{self, Preview};
 use crate::probe::{self, MediaInfo};
 use crate::run::{self, Handle, Progress, RunEvent};
+use crate::text::{Lang, tr};
 use crate::theme::Theme;
 use crate::ui;
 use crate::util::{latin_key, parse_time};
@@ -26,6 +31,7 @@ pub enum Event {
     Probed { generation: u64, path: PathBuf, info: MediaInfo },
     Run(RunEvent),
     Keyframe { generation: u64, at: f64, key: Option<f64> },
+    Frame { path: PathBuf, key: preview::Key, frame: Option<Protocol> },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -64,6 +70,7 @@ pub struct CutResult {
 }
 
 pub struct Done {
+    pub op: OpKind,
     pub cmd: CommandLine,
     pub output: PathBuf,
     pub before: u64,
@@ -89,6 +96,7 @@ pub struct Toast {
 
 pub struct App {
     pub theme: Theme,
+    pub lang: Lang,
     pub screen: Screen,
     pub overlay: Option<Overlay>,
     pub picker: Picker,
@@ -104,9 +112,17 @@ pub struct App {
     pub failed: Option<Failed>,
     /// For the start asked for, the keyframe a stream copy would begin at.
     pub keyframe: Option<(f64, f64)>,
+    /// The frame preview; `None` where there is no terminal to ask, or when
+    /// it is switched off.
+    pub preview: Option<Preview>,
+    /// The terminal size in cells, as of the last resize.
+    pub term: (u16, u16),
     pub log: Vec<String>,
     pub toast: Option<Toast>,
     pub quit: bool,
+    /// From the config: applied to every file.
+    defaults: Prefill,
+    /// From the command line: applied to the first file only.
     prefill: Option<Prefill>,
     keyframe_generation: Arc<AtomicU64>,
     tx: Sender<Event>,
@@ -116,6 +132,9 @@ fn int_of(v: &mut Values, id: FieldId) -> Option<&mut i64> {
     match id {
         FieldId::Crf => Some(&mut v.crf),
         FieldId::Quality => Some(&mut v.quality),
+        FieldId::Duration => Some(&mut v.duration),
+        FieldId::Fps => Some(&mut v.fps),
+        FieldId::Width => Some(&mut v.width),
         _ => None,
     }
 }
@@ -124,14 +143,19 @@ fn choice_of(v: &mut Values, id: FieldId) -> Option<&mut usize> {
     match id {
         FieldId::Preset => Some(&mut v.preset),
         FieldId::Resolution => Some(&mut v.resolution),
+        FieldId::Sound => Some(&mut v.sound),
         FieldId::Mode => Some(&mut v.mode),
         FieldId::Format => Some(&mut v.format),
+        FieldId::Container => Some(&mut v.container),
+        FieldId::Speed => Some(&mut v.speed),
+        FieldId::Image => Some(&mut v.image),
         _ => None,
     }
 }
 
 fn time_of(v: &mut Values, id: FieldId) -> Option<&mut f64> {
     match id {
+        FieldId::Cursor => Some(&mut v.cursor),
         FieldId::Start => Some(&mut v.start),
         FieldId::End => Some(&mut v.end),
         _ => None,
@@ -155,9 +179,10 @@ fn copy_to_clipboard(text: &str) -> bool {
 }
 
 impl App {
-    pub fn new(theme: Theme, tx: Sender<Event>, op: OpKind, prefill: Prefill) -> Self {
+    pub fn new(theme: Theme, tx: Sender<Event>, op: OpKind, prefill: Prefill, config: Config) -> Self {
         App {
             theme,
+            lang: config.lang,
             screen: Screen::Pick,
             overlay: None,
             picker: Picker::new(PathBuf::from(".")),
@@ -170,13 +195,20 @@ impl App {
             done: None,
             failed: None,
             keyframe: None,
+            preview: None,
+            term: (0, 0),
             log: vec![],
             toast: None,
             quit: false,
+            defaults: config.defaults,
             prefill: Some(prefill),
             keyframe_generation: Arc::new(AtomicU64::new(0)),
             tx,
         }
+    }
+
+    pub fn tr<'a>(&self, s: &'a str) -> &'a str {
+        tr(self.lang, s)
     }
 
     pub fn fields(&self) -> Vec<FieldSpec> {
@@ -191,17 +223,22 @@ impl App {
         self.doc.as_ref().map_or(vec![], |d| op::check(self.op, &d.values, &d.info))
     }
 
+    /// A translated template with `{}` filled in.
+    fn fill(&self, template: &str, arg: &str) -> String {
+        self.tr(template).replace("{}", arg)
+    }
+
     fn say(&mut self, text: impl Into<String>, error: bool) {
         self.toast =
             Some(Toast { text: text.into(), error, until: Instant::now() + Duration::from_secs(5) });
     }
 
-    /// Makes `info` the file being worked on. Options from the command line
-    /// are applied to the first file only.
+    /// Makes `info` the file being worked on.
     pub fn open(&mut self, info: MediaInfo) -> Result<()> {
         let mut values = Values::defaults(&info);
+        cli::apply(&self.defaults, &mut values, &info, false)?;
         if let Some(prefill) = self.prefill.take() {
-            cli::apply(&prefill, &mut values, &info)?;
+            cli::apply(&prefill, &mut values, &info, true)?;
         }
         if !self.op.available(&info) {
             self.op = OpKind::ALL.into_iter().find(|o| o.available(&info)).unwrap_or(self.op);
@@ -212,6 +249,7 @@ impl App {
         self.edit = None;
         self.dropdown = None;
         self.refresh_keyframe();
+        self.sync_preview();
         Ok(())
     }
 
@@ -229,9 +267,10 @@ impl App {
         thread::spawn(move || {
             for path in paths {
                 if let Ok(info) = probe::probe(&path)
-                    && tx.send(Event::Probed { generation, path, info }).is_err() {
-                        break;
-                    }
+                    && tx.send(Event::Probed { generation, path, info }).is_err()
+                {
+                    break;
+                }
             }
         });
     }
@@ -255,6 +294,32 @@ impl App {
         });
     }
 
+    /// The time whose frame belongs on screen now, and the size to draw it at.
+    pub fn preview_target(&self) -> Option<(f64, (u16, u16))> {
+        let doc = self.doc.as_ref()?;
+        if self.screen != Screen::Form || !self.op.has_timeline() {
+            return None;
+        }
+        let video = doc.info.video.as_ref()?;
+        let size = preview::size(self.term, video.width as f64 / video.height.max(1) as f64)?;
+        let focus = self.fields().get(self.focus).map(|f| f.id);
+        let v = &doc.values;
+        let t = match (self.op, focus) {
+            (OpKind::Cut, Some(FieldId::Start)) | (OpKind::Gif, _) => v.start,
+            (OpKind::Cut, Some(FieldId::End)) => v.end,
+            _ => v.cursor,
+        };
+        // The very last instant of a file has no frame to show.
+        Some((t.min((doc.info.duration - 0.05).max(0.0)), size))
+    }
+
+    fn sync_preview(&mut self) {
+        let target = self.preview_target();
+        if let (Some(preview), Some((t, size)), Some(doc)) = (&mut self.preview, target, &self.doc) {
+            preview.want(&doc.info.path, t, size);
+        }
+    }
+
     pub fn tick(&mut self) {
         if self.toast.as_ref().is_some_and(|t| Instant::now() > t.until) {
             self.toast = None;
@@ -267,16 +332,23 @@ impl App {
     pub fn handle(&mut self, event: Event) {
         match event {
             Event::Input(TermEvent::Key(key)) if key.kind != KeyEventKind::Release => self.key(key),
+            Event::Input(TermEvent::Resize(w, h)) => self.term = (w, h),
             Event::Input(_) => {}
             Event::Probed { generation, path, info } => {
                 if generation == self.picker.generation
-                    && let Some(e) = self.picker.entries.iter_mut().find(|e| e.path == path) {
-                        e.info = Some(info);
-                    }
+                    && let Some(e) = self.picker.entries.iter_mut().find(|e| e.path == path)
+                {
+                    e.info = Some(info);
+                }
             }
             Event::Keyframe { generation, at, key } => {
                 if generation == self.keyframe_generation.load(Ordering::SeqCst) {
                     self.keyframe = key.map(|k| (at, k));
+                }
+            }
+            Event::Frame { path, key, frame } => {
+                if let (Some(preview), Some(frame)) = (&mut self.preview, frame) {
+                    preview.accept(&path, key, frame);
                 }
             }
             Event::Run(RunEvent::Progress(p)) => {
@@ -286,6 +358,7 @@ impl App {
             }
             Event::Run(RunEvent::Finished { code, cancelled }) => self.finished(code, cancelled),
         }
+        self.sync_preview();
     }
 
     fn finished(&mut self, code: Option<i32>, cancelled: bool) {
@@ -295,14 +368,12 @@ impl App {
         if cancelled {
             let removed = std::fs::remove_file(&run.output).is_ok();
             self.screen = Screen::Form;
-            self.say(
-                if removed {
-                    format!("Cancelled. The unfinished {name} was removed.")
-                } else {
-                    "Cancelled.".to_string()
-                },
-                false,
-            );
+            let text = if removed {
+                self.fill("Cancelled. The unfinished {} was removed.", &name)
+            } else {
+                self.tr("Cancelled.").to_string()
+            };
+            self.say(text, false);
         } else if code == Some(0) {
             let Some(doc) = &self.doc else { return };
             let after = std::fs::metadata(&run.output).map(|m| m.len()).unwrap_or(0);
@@ -315,6 +386,7 @@ impl App {
                 CutResult { start: v.start, end: v.end, got_start }
             });
             self.done = Some(Done {
+                op: self.op,
                 cmd: run.cmd,
                 output: run.output,
                 before: doc.info.size,
@@ -340,7 +412,8 @@ impl App {
 
     fn start(&mut self) {
         if let Some(p) = self.problems().into_iter().next() {
-            self.say(p.text, true);
+            let text = self.fill(p.text, &p.arg);
+            self.say(text, true);
             return;
         }
         let Some(doc) = &mut self.doc else { return };
@@ -379,9 +452,18 @@ impl App {
         };
         let Some(cmd) = cmd else { return };
         if copy_to_clipboard(&op::shell(&cmd)) {
-            self.say("The command is in the clipboard.", false);
+            let text = self.tr("The command is in the clipboard.").to_string();
+            self.say(text, false);
         } else {
-            self.say("No clipboard tool here: pbcopy, wl-copy or xclip is needed.", true);
+            let text = self.tr("No clipboard tool here: pbcopy, wl-copy or xclip is needed.").to_string();
+            self.say(text, true);
+        }
+    }
+
+    fn switch_language(&mut self) {
+        self.lang = if self.lang == Lang::En { Lang::Ru } else { Lang::En };
+        if let Err(e) = config::save_lang(self.lang) {
+            self.say(format!("{e:#}"), true);
         }
     }
 
@@ -394,14 +476,11 @@ impl App {
             return;
         }
         if let Some(overlay) = self.overlay {
-            let close = match (overlay, key.code) {
-                (_, KeyCode::Esc) => true,
-                (Overlay::Keys, KeyCode::Char('?')) => true,
-                (Overlay::Log, KeyCode::Char(c)) => latin_key(c) == 'l',
-                _ => false,
-            };
-            if close {
-                self.overlay = None;
+            match (overlay, key.code) {
+                (_, KeyCode::Esc) | (Overlay::Keys, KeyCode::Char('?')) => self.overlay = None,
+                (Overlay::Keys, KeyCode::Tab) => self.switch_language(),
+                (Overlay::Log, KeyCode::Char(c)) if latin_key(c) == 'l' => self.overlay = None,
+                _ => {}
             }
             return;
         }
@@ -539,9 +618,9 @@ impl App {
         let (Some(spec), Some(doc)) = (self.focused(), &mut self.doc) else { return };
         let v = &mut doc.values;
         match &spec.kind {
-            Kind::Int { min, max, big: big_step, .. } => {
+            Kind::Int { min, max, step, big: big_step, .. } => {
                 if let Some(n) = int_of(v, spec.id) {
-                    *n = (*n + dir * if big { *big_step } else { 1 }).clamp(*min, *max);
+                    *n = (*n + dir * if big { *big_step } else { *step }).clamp(*min, *max);
                 }
             }
             Kind::Choice { items, .. } => {
@@ -571,9 +650,23 @@ impl App {
         }
     }
 
+    /// `i` and `o`: the cursor becomes the start or the end of the piece.
+    fn mark(&mut self, id: FieldId) {
+        let Some(doc) = &mut self.doc else { return };
+        if self.op != OpKind::Cut {
+            return;
+        }
+        let cursor = doc.values.cursor;
+        if let Some(t) = time_of(&mut doc.values, id) {
+            *t = cursor;
+        }
+        self.changed(id);
+    }
+
     fn reset_field(&mut self) {
         let (Some(spec), Some(doc)) = (self.focused(), &mut self.doc) else { return };
         let mut defaults = Values::defaults(&doc.info);
+        let _ = cli::apply(&self.defaults, &mut defaults, &doc.info, false);
         let v = &mut doc.values;
         if let (Some(a), Some(b)) = (int_of(v, spec.id), int_of(&mut defaults, spec.id)) {
             *a = *b;
@@ -595,6 +688,7 @@ impl App {
         let (Some(spec), Some(doc)) = (self.focused(), &mut self.doc) else { return };
         let v = &mut doc.values;
         let text = text.trim();
+        let mut complaint = None;
         match &spec.kind {
             Kind::Int { min, max, .. } => match text.parse::<i64>() {
                 Ok(n) => {
@@ -602,7 +696,7 @@ impl App {
                         *slot = n.clamp(*min, *max);
                     }
                 }
-                Err(_) => self.say(format!("{text} is not a number."), true),
+                Err(_) => complaint = Some("{} is not a number."),
             },
             Kind::Time => match parse_time(text) {
                 Some(t) => {
@@ -611,10 +705,14 @@ impl App {
                         *slot = t.min(duration);
                     }
                 }
-                None => self.say(format!("{text} is not a time; write 38, 0:38 or 00:00:38."), true),
+                None => complaint = Some("{} is not a time; write 38, 0:38 or 00:00:38."),
             },
             Kind::Text => v.output = (!text.is_empty()).then(|| text.to_string()),
             _ => {}
+        }
+        if let Some(template) = complaint {
+            let message = self.fill(template, text);
+            self.say(message, true);
         }
         self.changed(spec.id);
     }
@@ -699,6 +797,8 @@ impl App {
                 'c' => self.copy_command(),
                 'f' => self.open_picker(),
                 'q' => self.quit = true,
+                'i' => self.mark(FieldId::Start),
+                'o' => self.mark(FieldId::End),
                 'H' => self.adjust(-1, true),
                 'L' => self.adjust(1, true),
                 ',' => self.step_frame(-1.0),
@@ -726,17 +826,36 @@ pub struct Start {
     pub op: Option<OpKind>,
     pub info: Option<MediaInfo>,
     pub prefill: Prefill,
+    pub config: Config,
 }
 
 pub fn run(start: Start) -> Result<()> {
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(Theme::detect(), tx.clone(), start.op.unwrap_or(OpKind::Compress), start.prefill);
+    let mut app = App::new(
+        Theme::detect(),
+        tx.clone(),
+        start.op.unwrap_or(OpKind::Compress),
+        start.prefill,
+        start.config,
+    );
     match start.info {
         // Before the terminal is taken over: a bad option should read as a
         // plain error, not flash by inside the form.
         Some(info) => app.open(info)?,
         None => app.open_picker(),
     }
+
+    let mut terminal = ratatui::init();
+    // The terminal is asked which graphics it speaks. That reads the answer
+    // from stdin, so it has to happen before the input thread starts.
+    if std::env::var("KADR_PREVIEW").as_deref() != Ok("off") {
+        let graphics = GraphicsPicker::from_query_stdio().unwrap_or_else(|_| GraphicsPicker::halfblocks());
+        app.preview = Some(Preview::new(graphics, tx.clone()));
+    }
+    if let Ok(size) = terminal.size() {
+        app.term = (size.width, size.height);
+    }
+    app.sync_preview();
 
     thread::spawn(move || {
         while let Ok(e) = event::read() {
@@ -746,7 +865,6 @@ pub fn run(start: Start) -> Result<()> {
         }
     });
 
-    let mut terminal = ratatui::init();
     let result = (|| -> Result<()> {
         while !app.quit {
             terminal.draw(|f| ui::draw(f, &app))?;
@@ -773,19 +891,19 @@ pub fn run(start: Start) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::op::testing::lecture;
 
-    fn app() -> App {
+    pub fn app() -> App {
         let (tx, _rx) = mpsc::channel();
         // The receiver is dropped: sends from background threads just fail.
-        let mut app = App::new(Theme::ansi(), tx, OpKind::Compress, Prefill::default());
+        let mut app = App::new(Theme::ansi(), tx, OpKind::Compress, Prefill::default(), Config::default());
         app.open(lecture()).unwrap();
         app
     }
 
-    fn press(app: &mut App, code: KeyCode) {
+    pub fn press(app: &mut App, code: KeyCode) {
         app.handle(Event::Input(TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))));
     }
 
@@ -830,23 +948,58 @@ mod tests {
     }
 
     #[test]
-    fn tab_switches_the_operation() {
+    fn tab_walks_through_every_operation_and_back() {
         let mut app = app();
-        press(&mut app, KeyCode::Tab);
-        assert_eq!(app.op, OpKind::Cut);
-        press(&mut app, KeyCode::Tab);
-        press(&mut app, KeyCode::Tab);
-        assert_eq!(app.op, OpKind::Compress);
+        let mut seen = vec![app.op];
+        for _ in 0..OpKind::ALL.len() {
+            press(&mut app, KeyCode::Tab);
+            seen.push(app.op);
+        }
+        assert_eq!(&seen[..OpKind::ALL.len()], &OpKind::ALL);
+        assert_eq!(seen.last(), Some(&OpKind::Compress));
     }
 
     #[test]
-    fn cut_keys_work_in_a_cyrillic_layout() {
+    fn the_cursor_marks_the_piece_with_i_and_o() {
         let mut app = app();
         press(&mut app, KeyCode::Tab);
+        assert_eq!(app.fields()[app.focus].id, FieldId::Cursor);
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Char('L'));
+        }
+        press(&mut app, KeyCode::Char('i'));
+        press(&mut app, KeyCode::Char('L'));
+        press(&mut app, KeyCode::Char('щ')); // the key that types o
+        assert!(shown(&app).contains("-ss 00:00:30 -to 00:00:40"), "{}", shown(&app));
+    }
+
+    #[test]
+    fn time_keys_work_in_a_cyrillic_layout() {
+        let mut app = app();
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Char('Д')); // the key that types L
         assert!(shown(&app).contains("-ss 00:00:10"));
         press(&mut app, KeyCode::Char('ю')); // the key that types .
         assert!(shown(&app).contains("-ss 00:00:10.040"));
+    }
+
+    #[test]
+    fn the_preview_follows_the_field_in_focus() {
+        let mut app = app();
+        app.term = (120, 40);
+        press(&mut app, KeyCode::Tab);
+        {
+            let v = &mut app.doc.as_mut().unwrap().values;
+            (v.cursor, v.start, v.end) = (5.0, 38.0, 72.0);
+        }
+        assert_eq!(app.preview_target().map(|t| t.0), Some(5.0));
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.preview_target().map(|t| t.0), Some(38.0));
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.preview_target().map(|t| t.0), Some(72.0));
+        app.op = OpKind::Compress;
+        assert_eq!(app.preview_target(), None);
     }
 
     #[test]
@@ -868,9 +1021,21 @@ mod tests {
     }
 
     #[test]
+    fn config_defaults_fill_the_form_and_are_what_backspace_returns_to() {
+        let (tx, _rx) = mpsc::channel();
+        let config = Config { defaults: Prefill { crf: Some(27), ..Default::default() }, ..Default::default() };
+        let mut app = App::new(Theme::ansi(), tx, OpKind::Compress, Prefill::default(), config);
+        app.open(lecture()).unwrap();
+        assert!(shown(&app).contains("-crf 27"));
+        press(&mut app, KeyCode::Left);
+        press(&mut app, KeyCode::Backspace);
+        assert!(shown(&app).contains("-crf 27"));
+    }
+
+    #[test]
     fn audio_only_files_open_on_audio() {
         let (tx, _rx) = mpsc::channel();
-        let mut app = App::new(Theme::ansi(), tx, OpKind::Compress, Prefill::default());
+        let mut app = App::new(Theme::ansi(), tx, OpKind::Compress, Prefill::default(), Config::default());
         let mut info = lecture();
         info.video = None;
         app.open(info).unwrap();

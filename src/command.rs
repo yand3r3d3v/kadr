@@ -21,6 +21,7 @@ pub enum Look {
 }
 
 const INDENT: usize = 7; // under the first argument, after "ffmpeg "
+const DEEP: usize = INDENT + 5; // the rest of an argument too long for one line
 
 fn arg_width(arg: &Arg) -> usize {
     let text = arg.text();
@@ -38,24 +39,6 @@ fn units(cmd: &CommandLine) -> Vec<&[Arg]> {
         i += len;
     }
     units
-}
-
-/// Breaks the command into lines of at most `width` cells where it can.
-pub fn wrap(cmd: &CommandLine, width: usize) -> Vec<Vec<&Arg>> {
-    let mut lines: Vec<Vec<&Arg>> = vec![vec![]];
-    let mut used = 0;
-    for unit in units(cmd) {
-        let w: usize = unit.iter().map(arg_width).sum::<usize>() + unit.len() - 1;
-        let line = lines.last_mut().unwrap();
-        if !line.is_empty() && used + 1 + w > width {
-            lines.push(unit.iter().collect());
-            used = INDENT + w;
-        } else {
-            used += if line.is_empty() { w } else { 1 + w };
-            line.extend(unit.iter());
-        }
-    }
-    lines
 }
 
 fn style(p: &Part, is_output: bool, look: Look, th: &Theme) -> Style {
@@ -89,33 +72,78 @@ fn style(p: &Part, is_output: bool, look: Look, th: &Theme) -> Style {
     }
 }
 
+/// An argument as styled pieces that a line may break between: after each
+/// `,` and `;`, which is where a long filter reads naturally.
+fn pieces(arg: &Arg, look: Look, th: &Theme) -> Vec<Span<'static>> {
+    let mut out = vec![];
+    let quote = needs_quote(&arg.text());
+    if quote {
+        out.push(Span::raw("'"));
+    }
+    for p in &arg.parts {
+        let st = style(p, arg.is_output, look, th);
+        let mut piece = String::new();
+        for c in p.text.chars() {
+            piece.push(c);
+            if c == ',' || c == ';' {
+                out.push(Span::styled(std::mem::take(&mut piece), st));
+            }
+        }
+        if !piece.is_empty() {
+            out.push(Span::styled(piece, st));
+        }
+    }
+    if quote {
+        out.push(Span::raw("'"));
+    }
+    out
+}
+
+fn cells(span: &Span) -> usize {
+    span.content.chars().count()
+}
+
+/// Breaks the command into lines of at most `width` cells where it can.
 pub fn lines(cmd: &CommandLine, width: usize, look: Look, th: &Theme) -> Vec<Line<'static>> {
-    wrap(cmd, width)
-        .into_iter()
-        .enumerate()
-        .map(|(n, args)| {
-            let mut spans = vec![];
-            if n > 0 {
-                spans.push(Span::raw(" ".repeat(INDENT)));
+    let mut out: Vec<Vec<Span<'static>>> = vec![vec![]];
+    let mut used = 0;
+    let mut deep = false;
+    let newline = |out: &mut Vec<Vec<Span<'static>>>, used: &mut usize, indent: usize| {
+        out.push(vec![Span::raw(" ".repeat(indent))]);
+        *used = indent;
+    };
+    for unit in units(cmd) {
+        let w: usize = unit.iter().map(arg_width).sum::<usize>() + unit.len() - 1;
+        let fresh = out.last().is_some_and(|l| l.len() <= 1) && (used == 0 || used == INDENT);
+        let fits_here = used == 0 || used + 1 + w <= width;
+        let fits_alone = INDENT + w <= width;
+        // What follows a broken argument starts its own line, back at the
+        // usual indent.
+        if (!fits_here && !fresh) || std::mem::take(&mut deep) {
+            newline(&mut out, &mut used, INDENT);
+        }
+        let start_of_line = used == 0 || (used == INDENT && out.last().is_some_and(|l| l.len() == 1));
+        if !start_of_line {
+            out.last_mut().unwrap().push(Span::raw(" "));
+            used += 1;
+        }
+        for (i, arg) in unit.iter().enumerate() {
+            if i > 0 {
+                out.last_mut().unwrap().push(Span::raw(" "));
+                used += 1;
             }
-            for (i, arg) in args.iter().enumerate() {
-                if i > 0 {
-                    spans.push(Span::raw(" "));
+            for piece in pieces(arg, look, th) {
+                // Only an argument too long for any line is broken inside.
+                if !fits_alone && used + cells(&piece) > width && used > DEEP {
+                    newline(&mut out, &mut used, DEEP);
+                    deep = true;
                 }
-                let quote = needs_quote(&arg.text());
-                if quote {
-                    spans.push(Span::raw("'"));
-                }
-                for p in &arg.parts {
-                    spans.push(Span::styled(p.text.clone(), style(p, arg.is_output, look, th)));
-                }
-                if quote {
-                    spans.push(Span::raw("'"));
-                }
+                used += cells(&piece);
+                out.last_mut().unwrap().push(piece);
             }
-            Line::from(spans)
-        })
-        .collect()
+        }
+    }
+    out.into_iter().map(Line::from).collect()
 }
 
 #[cfg(test)]
@@ -142,6 +170,24 @@ mod tests {
                 "       -b:a 128k lecture_04_small.mp4",
             ]
         );
+    }
+
+    #[test]
+    fn an_argument_too_long_for_a_line_breaks_after_a_separator() {
+        let info = lecture();
+        let v = Values::defaults(&info);
+        let cmd = build(OpKind::Gif, &v, &info);
+        let got = text(&lines(&cmd, 60, Look::Frozen, &Theme::ansi()));
+        assert_eq!(
+            got,
+            vec![
+                "ffmpeg -ss 00:00:00 -t 5 -i lecture_04.mov",
+                "       -vf 'fps=12,scale=480:-1:flags=lanczos,split[a][b];",
+                "            [a]palettegen[p];[b][p]paletteuse'",
+                "       -loop 0 lecture_04.gif",
+            ]
+        );
+        assert!(got.iter().all(|l| l.chars().count() <= 60), "{got:?}");
     }
 
     #[test]

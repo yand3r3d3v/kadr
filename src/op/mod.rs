@@ -4,7 +4,11 @@
 
 pub mod audio;
 pub mod compress;
+pub mod convert;
 pub mod cut;
+pub mod frame;
+pub mod gif;
+pub mod speed;
 
 use std::path::PathBuf;
 
@@ -15,25 +19,46 @@ use crate::util::shell_quote;
 pub enum OpKind {
     Compress,
     Cut,
+    Gif,
     Audio,
+    Convert,
+    Speed,
+    Frame,
 }
 
 impl OpKind {
-    pub const ALL: [OpKind; 3] = [OpKind::Compress, OpKind::Cut, OpKind::Audio];
+    pub const ALL: [OpKind; 7] = [
+        OpKind::Compress,
+        OpKind::Cut,
+        OpKind::Gif,
+        OpKind::Audio,
+        OpKind::Convert,
+        OpKind::Speed,
+        OpKind::Frame,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             OpKind::Compress => "compress",
             OpKind::Cut => "cut",
+            OpKind::Gif => "gif",
             OpKind::Audio => "audio",
+            OpKind::Convert => "convert",
+            OpKind::Speed => "speed",
+            OpKind::Frame => "frame",
         }
     }
 
     pub fn available(self, info: &MediaInfo) -> bool {
         match self {
-            OpKind::Compress | OpKind::Cut => info.video.is_some(),
             OpKind::Audio => info.audio.is_some(),
+            _ => info.video.is_some(),
         }
+    }
+
+    /// Operations where a frame of the video helps to choose a time.
+    pub fn has_timeline(self) -> bool {
+        matches!(self, OpKind::Cut | OpKind::Gif | OpKind::Frame)
     }
 }
 
@@ -43,12 +68,20 @@ pub enum FieldId {
     Crf,
     Preset,
     Resolution,
+    Sound,
+    Cursor,
     Start,
     End,
     Length,
     Mode,
+    Duration,
+    Fps,
+    Width,
     Format,
     Quality,
+    Container,
+    Speed,
+    Image,
     Output,
 }
 
@@ -62,7 +95,7 @@ pub struct Choice {
 pub enum Kind {
     File,
     /// `soft` is the range worth staying in; outside it the value turns red.
-    Int { min: i64, max: i64, soft: (i64, i64), big: i64 },
+    Int { min: i64, max: i64, soft: (i64, i64), step: i64, big: i64 },
     /// `inline` choices sit side by side; the rest open as a list.
     Choice { items: Vec<Choice>, selected: usize, inline: bool },
     Time,
@@ -83,6 +116,21 @@ pub struct FieldSpec {
 impl FieldSpec {
     pub fn focusable(&self) -> bool {
         self.enabled && !matches!(self.kind, Kind::Info)
+    }
+}
+
+fn inline(id: FieldId, label: &'static str, items: &[(&str, &'static str)], selected: usize) -> FieldSpec {
+    FieldSpec {
+        id,
+        label,
+        kind: Kind::Choice {
+            items: items.iter().map(|(l, hint)| Choice { label: l.to_string(), hint }).collect(),
+            selected,
+            inline: true,
+        },
+        value: items[selected.min(items.len() - 1)].0.to_string(),
+        hint: "",
+        enabled: true,
     }
 }
 
@@ -167,33 +215,46 @@ impl Builder {
         self.flag("-i", Some(FieldId::File)).value(input_arg(info), FieldId::File)
     }
 
-    pub fn output(mut self, parts: Vec<Part>) -> CommandLine {
-        self.0.push(Arg { parts, is_output: true });
+    pub fn output(mut self, op: OpKind, v: &Values, info: &MediaInfo) -> CommandLine {
+        self.0.push(Arg { parts: output_parts(op, v, info), is_output: true });
         self.0
     }
 }
 
 /// The values of every field of every operation. One struct keeps a value
-/// alive when the user switches tabs and comes back.
+/// alive when the user switches tabs and comes back; `start` and `cursor`
+/// are shared on purpose, so a moment found in one tab is there in the next.
 #[derive(Clone, Debug)]
 pub struct Values {
     pub crf: i64,
     pub preset: usize,
     pub resolution: usize,
+    pub sound: usize,
+    pub cursor: f64,
     pub start: f64,
     pub end: f64,
     pub mode: usize,
+    pub duration: i64,
+    pub fps: i64,
+    pub width: i64,
     pub format: usize,
     pub quality: i64,
+    pub container: usize,
+    pub speed: usize,
+    pub image: usize,
     /// A name the user typed; `None` means the default next to the input.
     pub output: Option<String>,
     pub overwrite: bool,
 }
 
+pub const SOUND_KEEP: usize = 0;
+pub const SOUND_REMOVE: usize = 1;
 pub const MODE_FAST: usize = 0;
 pub const MODE_EXACT: usize = 1;
 pub const FORMAT_MP3: usize = 0;
 pub const FORMAT_COPY: usize = 1;
+pub const IMAGE_PNG: usize = 0;
+pub const IMAGE_JPG: usize = 1;
 
 impl Values {
     pub fn defaults(info: &MediaInfo) -> Self {
@@ -201,21 +262,42 @@ impl Values {
             crf: 23,
             preset: compress::DEFAULT_PRESET,
             resolution: compress::default_resolution(info),
+            sound: SOUND_KEEP,
+            cursor: 0.0,
             start: 0.0,
             end: info.duration,
             mode: MODE_FAST,
+            duration: gif::default_duration(info),
+            fps: 12,
+            width: gif::default_width(info),
             format: FORMAT_MP3,
             quality: 2,
+            container: 0,
+            speed: speed::DEFAULT,
+            image: IMAGE_PNG,
             output: None,
             overwrite: false,
         }
     }
 }
 
+/// Something that stops the command from running. `text` is an English
+/// template; `{}` in it stands for `arg`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Problem {
     pub field: Option<FieldId>,
-    pub text: String,
+    pub text: &'static str,
+    pub arg: String,
+}
+
+impl Problem {
+    fn new(field: FieldId, text: &'static str) -> Self {
+        Problem { field: Some(field), text, arg: String::new() }
+    }
+
+    pub fn english(&self) -> String {
+        self.text.replace("{}", &self.arg)
+    }
 }
 
 pub fn fields(op: OpKind, v: &Values, info: &MediaInfo) -> Vec<FieldSpec> {
@@ -230,7 +312,11 @@ pub fn fields(op: OpKind, v: &Values, info: &MediaInfo) -> Vec<FieldSpec> {
     f.extend(match op {
         OpKind::Compress => compress::fields(v, info),
         OpKind::Cut => cut::fields(v, info),
+        OpKind::Gif => gif::fields(v, info),
         OpKind::Audio => audio::fields(v, info),
+        OpKind::Convert => convert::fields(v, info),
+        OpKind::Speed => speed::fields(v, info),
+        OpKind::Frame => frame::fields(v, info),
     });
     f.push(FieldSpec {
         id: FieldId::Output,
@@ -247,13 +333,18 @@ pub fn build(op: OpKind, v: &Values, info: &MediaInfo) -> CommandLine {
     match op {
         OpKind::Compress => compress::build(v, info),
         OpKind::Cut => cut::build(v, info),
+        OpKind::Gif => gif::build(v, info),
         OpKind::Audio => audio::build(v, info),
+        OpKind::Convert => convert::build(v, info),
+        OpKind::Speed => speed::build(v, info),
+        OpKind::Frame => frame::build(v, info),
     }
 }
 
 pub fn check(op: OpKind, v: &Values, info: &MediaInfo) -> Vec<Problem> {
     let mut problems = match op {
         OpKind::Cut => cut::check(v, info),
+        OpKind::Gif => gif::check(v, info),
         _ => vec![],
     };
     let out = output_path(op, v, info);
@@ -262,10 +353,10 @@ pub fn check(op: OpKind, v: &Values, info: &MediaInfo) -> Vec<Problem> {
         _ => out == info.path,
     };
     if same {
-        problems.push(Problem {
-            field: Some(FieldId::Output),
-            text: "The output is the input file itself. Change the name.".into(),
-        });
+        problems.push(Problem::new(
+            FieldId::Output,
+            "The output is the input file itself. Change the name.",
+        ));
     }
     problems
 }
@@ -274,6 +365,9 @@ pub fn check(op: OpKind, v: &Values, info: &MediaInfo) -> Vec<Problem> {
 pub fn result_duration(op: OpKind, v: &Values, info: &MediaInfo) -> f64 {
     match op {
         OpKind::Cut => (v.end - v.start).max(0.0),
+        OpKind::Gif => v.duration as f64,
+        OpKind::Speed => info.duration / speed::SPEEDS[v.speed].0,
+        OpKind::Frame => 0.0,
         _ => info.duration,
     }
 }
@@ -284,54 +378,50 @@ pub fn input_arg(info: &MediaInfo) -> String {
     if s.starts_with('-') { format!("./{s}") } else { s }
 }
 
-fn default_output(op: OpKind, v: &Values, info: &MediaInfo) -> (String, String) {
-    let stem = info
-        .path
+fn stem(info: &MediaInfo) -> String {
+    info.path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "out".into());
-    let source_ext = info
-        .path
+        .unwrap_or_else(|| "out".into())
+}
+
+fn source_ext(info: &MediaInfo) -> String {
+    info.path
         .extension()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "mp4".into());
-    let (name, ext) = match op {
-        OpKind::Compress => (format!("{stem}_small"), "mp4".to_string()),
-        OpKind::Cut if v.mode == MODE_EXACT => (format!("{stem}_cut"), "mp4".to_string()),
-        OpKind::Cut => (format!("{stem}_cut"), source_ext),
-        OpKind::Audio => (stem, audio::extension(v, info).to_string()),
-    };
-    let stem_path = info.path.with_file_name(name).to_string_lossy().into_owned();
-    let stem_path = if stem_path.starts_with('-') { format!("./{stem_path}") } else { stem_path };
-    (stem_path, ext)
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_else(|| "mp4".into())
+}
+
+/// `name` placed next to the input file, as the start of the output path.
+fn sibling(info: &MediaInfo, name: String) -> Part {
+    let s = info.path.with_file_name(name).to_string_lossy().into_owned();
+    let s = if s.starts_with('-') { format!("./{s}") } else { s };
+    part(s, Role::Output, Some(FieldId::Output))
+}
+
+/// The output argument. Pieces of a default name can belong to fields: the
+/// extension follows the audio format, the frame's name follows its time.
+fn output_parts(op: OpKind, v: &Values, info: &MediaInfo) -> Vec<Part> {
+    if let Some(name) = &v.output {
+        return vec![part(name.clone(), Role::Output, Some(FieldId::Output))];
+    }
+    match op {
+        OpKind::Compress => vec![sibling(info, format!("{}_small.mp4", stem(info)))],
+        OpKind::Cut => cut::output(v, info),
+        OpKind::Gif => vec![sibling(info, format!("{}.gif", stem(info)))],
+        OpKind::Audio => audio::output(v, info),
+        OpKind::Convert => convert::output(v, info),
+        OpKind::Speed => speed::output(v, info),
+        OpKind::Frame => frame::output(v, info),
+    }
 }
 
 pub fn output_name(op: OpKind, v: &Values, info: &MediaInfo) -> String {
-    match &v.output {
-        Some(name) => name.clone(),
-        None => {
-            let (stem, ext) = default_output(op, v, info);
-            format!("{stem}.{ext}")
-        }
-    }
+    output_parts(op, v, info).iter().map(|p| p.text.as_str()).collect()
 }
 
 pub fn output_path(op: OpKind, v: &Values, info: &MediaInfo) -> PathBuf {
     PathBuf::from(output_name(op, v, info))
-}
-
-/// The output argument. `ext_field` marks the extension as driven by a field,
-/// as with the audio format.
-fn output_parts(op: OpKind, v: &Values, info: &MediaInfo, ext_field: Option<FieldId>) -> Vec<Part> {
-    let out = Some(FieldId::Output);
-    match (&v.output, ext_field) {
-        (Some(name), _) => vec![part(name.clone(), Role::Output, out)],
-        (None, Some(field)) => {
-            let (stem, ext) = default_output(op, v, info);
-            vec![part(stem, Role::Output, out), part(format!(".{ext}"), Role::Value, Some(field))]
-        }
-        (None, None) => vec![part(output_name(op, v, info), Role::Output, out)],
-    }
 }
 
 #[cfg(test)]

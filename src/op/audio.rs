@@ -24,25 +24,16 @@ pub fn extension(v: &Values, info: &MediaInfo) -> &'static str {
 pub fn fields(v: &Values, _info: &MediaInfo) -> Vec<FieldSpec> {
     let copy = v.format == FORMAT_COPY;
     vec![
-        FieldSpec {
-            id: FieldId::Format,
-            label: "format",
-            kind: Kind::Choice {
-                items: vec![
-                    Choice { label: "mp3".into(), hint: "plays everywhere" },
-                    Choice { label: "as is".into(), hint: "the track is copied without loss" },
-                ],
-                selected: v.format,
-                inline: true,
-            },
-            value: if copy { "as is" } else { "mp3" }.into(),
-            hint: "",
-            enabled: true,
-        },
+        inline(
+            FieldId::Format,
+            "format",
+            &[("mp3", "plays everywhere"), ("as is", "the track is copied without loss")],
+            v.format,
+        ),
         FieldSpec {
             id: FieldId::Quality,
             label: "quality",
-            kind: Kind::Int { min: 0, max: 9, soft: (0, 9), big: 3 },
+            kind: Kind::Int { min: 0, max: 9, soft: (0, 9), step: 1, big: 3 },
             value: v.quality.to_string(),
             hint: if copy {
                 "not needed: the audio is not re-encoded"
@@ -65,7 +56,15 @@ pub fn build(v: &Values, info: &MediaInfo) -> CommandLine {
         b.flag("-c:a", format).value("libmp3lame", FieldId::Format);
         b.flag("-q:a", Some(FieldId::Quality)).value(v.quality.to_string(), FieldId::Quality);
     }
-    b.output(output_parts(OpKind::Audio, v, info, format))
+    b.output(OpKind::Audio, v, info)
+}
+
+/// One choice changes two places in the command: the codec and the extension.
+pub fn output(v: &Values, info: &MediaInfo) -> Vec<Part> {
+    vec![
+        sibling(info, stem(info)),
+        part(format!(".{}", extension(v, info)), Role::Value, Some(FieldId::Format)),
+    ]
 }
 
 #[cfg(test)]

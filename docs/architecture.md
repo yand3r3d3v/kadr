@@ -16,9 +16,18 @@ What kadr is not: a video editor, a player, a batch converter, or a wrapper arou
 
 ## Status
 
-Stage one is built: `compress`, `cut` and `audio`, the file picker, value lists, the run screen with cancel, the done, file-exists and ffmpeg-stopped screens, the keys page, the ffmpeg output page, `--print` and `--run`.
+All three planned stages are built, except joining files:
 
-Verified by 44 tests (command building, option parsing, the form's keys, screen rendering), by driving the form through a pseudo-terminal on a real clip, and by `--run` on all three operations. Built against ffmpeg 9.0.2 and cargo 1.98.
+- seven operations: `compress`, `cut`, `gif`, `audio`, `convert`, `speed`, `frame`;
+- the file picker, value lists, the run screen with cancel, the done, file-exists and ffmpeg-stopped screens, the keys page, the ffmpeg output page;
+- a frame of the video next to the fields in `cut`, `gif` and `frame`;
+- `--print` and `--run`;
+- a config file with defaults;
+- the interface in English and Russian, switched inside the program.
+
+Verified by 75 tests (command building, option parsing, the form's keys, screen rendering, the translation), by driving the form through a pseudo-terminal on a real clip, and by `--run` on every operation. Built against ffmpeg 9.0.2 and cargo 1.98.
+
+One thing is not verified: the frame preview through real terminal graphics. The pseudo-terminal used for testing speaks no graphics protocol, so only the half-block path has been seen working. The kitty, iTerm2 and sixel paths go through the same code up to the last call into ratatui-image.
 
 ## Prior art
 
@@ -37,30 +46,34 @@ There are no measurements behind this order. It comes from what ffmpeg cheat she
 
 | # | Task | How often | Cost for kadr | Stage |
 |---|---|---|---|---|
-| 1 | Compress, including a smaller frame and conversion to mp4 | All the time | Low | 1, done |
-| 2 | Cut a piece | All the time | Medium; high with a frame preview | 1 done without the frame; 2 adds it |
-| 3 | Extract the audio | Often | Low | 1, done |
+| 1 | Compress, including a smaller frame and conversion to mp4 | All the time | Low | 1 |
+| 2 | Cut a piece | All the time | Medium; high with a frame preview | 1 without the frame, 2 with it |
+| 3 | Extract the audio | Often | Low | 1 |
 | 4 | A gif from a fragment | Often | Low, the timeline exists | 2 |
 | 5 | Change the container without re-encoding (mov to mp4) | Often | Low | 2 |
 | 6 | Remove the audio | Sometimes | One field in `compress` | 2 |
 | 7 | Speed up or slow down | Sometimes | Low | 3 |
 | 8 | Save one frame as an image | Sometimes | Low once the preview exists | 3 |
-| 9 | Join several files | Sometimes | High: a list of files, compatibility checks | 3, not designed yet |
+| 9 | Join several files | Sometimes | High: a list of files, compatibility checks | Not built, not designed yet |
 | 10 | Burn in subtitles, crop, rotate | Rarely | Medium | Maybe never |
 
-There is no separate "resize" operation: it is the `resolution` field of `compress`.
+Rows 1 to 8 are built. There is no separate "resize" operation: it is the `resolution` field of `compress`.
 
 ## Command line
 
-Everything is English: operations, options, help, the form. A second interface language, Russian, is planned as a switch inside the program; operation and option names stay English in any language.
+Operations, options and help are English. The form has a second language, Russian, switched inside the program; operation and option names in the shell stay English in any language.
 
 ```
 kadr [FILE]                       open the form; without a file, the picker first
 kadr <OPERATION> FILE [OPTIONS]   open the form on that operation, fields filled in
 
-compress  --crf N  --preset NAME  --resolution 720p   -o OUT
-cut       --from T --to T         --exact             -o OUT
-audio     --format mp3|copy       --quality N         -o OUT
+compress  --crf N  --preset NAME  --resolution 720p  --no-audio   -o OUT
+cut       --from T --to T         --exact                          -o OUT
+gif       --from T --length S     --fps N  --width N               -o OUT
+audio     --format mp3|copy       --quality N                      -o OUT
+convert   --container mp4|mkv|mov                                  -o OUT
+speed     --speed 0.5|0.75|1.25|1.5|2                              -o OUT
+frame     --at T                  --format png|jpg                 -o OUT
 
 --print     build the command, print it, exit
 --run       run right away, without the form
@@ -105,14 +118,17 @@ src/
   probe.rs     ffprobe -of json → MediaInfo; keyframe lookup
   op/
     mod.rs     operation kinds, FieldSpec, command parts, the builder
-    compress.rs, cut.rs, audio.rs
+    compress.rs, cut.rs, gif.rs, audio.rs, convert.rs, speed.rs, frame.rs
                one file per operation: fields, checks, build()
   command.rs   the command frame: wrapping, lighting up the focused pieces
   run.rs       starting ffmpeg, parsing -progress, cancel, the stderr tail
+  preview.rs   the frame of the video: a worker thread and a cache
   picker.rs    the file list
   app.rs       state, event handling, transitions
   ui.rs        drawing
   plain.rs     --print and --run
+  config.rs    ~/.config/kadr/config.toml
+  text.rs      the Russian interface
   theme.rs     the palette, truecolor or ANSI-16
   util.rs      time, size and shell formatting
 ```
@@ -126,7 +142,7 @@ struct FieldSpec { id: FieldId, label: &'static str, kind: Kind, value: String, 
 
 enum Kind {
     File,
-    Int { min: i64, max: i64, soft: (i64, i64), big: i64 },
+    Int { min: i64, max: i64, soft: (i64, i64), step: i64, big: i64 },
     Choice { items: Vec<Choice>, selected: usize, inline: bool },
     Time,
     Text,
@@ -216,30 +232,77 @@ mp3:    ffmpeg -i IN -vn -c:a libmp3lame -q:a 2 IN.mp3
 as is:  ffmpeg -i IN -vn -c:a copy IN.m4a        the extension follows the codec
 ```
 
+### gif
+
+```
+ffmpeg -ss A -t D -i IN -vf "fps=12,scale=480:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse" -loop 0 IN.gif
+```
+
+The filter builds a palette from the piece itself, which is what makes a gif look right. Of that whole string only `12` and `480` belong to fields, and that is all the highlight shows. The frame wraps the filter after a `,` or `;` when it does not fit on a line.
+
+The length is capped at 60 seconds and turns carmine past 15: a long gif gets heavy fast. The width never exceeds the source.
+
+### convert
+
+```
+ffmpeg -i IN -c copy IN.mp4
+```
+
+Changes the container and nothing else. The containers on offer are mp4, mkv and mov, minus the one the file is already in. A codec that the chosen container cannot hold makes ffmpeg stop, and the "ffmpeg stopped" screen shows why.
+
+### speed
+
+```
+ffmpeg -i IN -vf setpts=PTS/2 -af atempo=2 IN_2x.mp4
+```
+
+One choice sets the factor in three places: the video filter, the audio filter and the file name. Without an audio track `-af` is left out. Progress is counted against the new length.
+
+### frame
+
+```
+ffmpeg -ss T -i IN -frames:v 1 IN_00-00-38.png
+```
+
+The name carries the time, so frames taken one after another do not overwrite each other. `jpg` adds `-q:v 2`.
+
+## The frame preview
+
+In `cut`, `gif` and `frame` a frame of the video is drawn to the left of the fields. It shows the time being chosen: the field in focus if it is a time, otherwise the cursor.
+
+- The frame comes from `ffmpeg -ss T -i IN -frames:v 1 -vf scale=W:-2 -f image2pipe -vcodec png -`, scaled to the pixels the preview will fill and no more.
+- One worker thread serves the requests, "latest wins": while an arrow key is held, the frames in between are never fetched. The worker also encodes the frame for the terminal, so the drawing thread only blits.
+- The last 48 frames are cached, keyed by time and size, so going back is instant.
+- Drawing is [ratatui-image](https://docs.rs/ratatui-image). At start it asks the terminal which protocol it speaks (kitty, iTerm2, sixel) and falls back to half blocks. That query reads the answer from stdin, so it runs before the input thread starts. It needs no system library, unlike chafa.
+- The preview takes what the window can spare: up to 12 rows, none at all under 22 rows. The form works the same without it.
+- `KADR_PREVIEW=off` switches it off.
+
+In `cut` the form has a `cursor` field: a time that is not part of the command. Move it to look around, then `i` makes it the start and `o` the end. `start` and `cursor` are shared between tabs, so a moment found in `cut` is there in `gif` and `frame`.
+
+## Configuration and language
+
+`~/.config/kadr/config.toml` (or under `$XDG_CONFIG_HOME`) holds `lang` and default field values per operation. Defaults are applied to every file that is opened, leniently: a value that does not fit a file is skipped for it. Command line options are applied after them, strictly: a value that does not fit is an error. `backspace` on a field returns to the configured default.
+
+The Russian interface is a table from the English text to the Russian one, in `text.rs`. The English string in the code is the key, and a string without an entry is shown as it is. The ffmpeg command, option names and file names never go through it. `tab` on the keys page switches the language and writes `lang` back to the config, leaving the rest of the file, comments included, as it was.
+
+In a narrow window a longer language must not push `esc` off the key bar, so the bar drops the keys the form makes obvious (`copy`, then `field`, then `value`) until it fits.
+
 ## Where the code departs from the canvas
 
 - **The form has an `output` field.** The "file exists" screen offered to change the name and there was nowhere to change it.
-- **`cut` has no cursor and no `i`/`o` keys yet.** Without a frame a cursor has nothing to show, so the arrows move `start` or `end` directly. The cursor comes with the frame preview.
+- **The cursor is a field.** On the canvas the arrows move a cursor on the timeline. In the code `cursor` is a row of the form like `start` and `end`, and the arrows move whichever of the three is in focus.
+- **The preview is smaller than drawn** in a small window, and absent in a very small one.
+- **Seven tabs, not four**, and `convert`, `speed` and `frame` have no artboards.
 - **`--help` is clap's standard help**, not the layout drawn on the canvas.
 - **The picker has no path completion on `tab`.** Folders open with `enter`.
 - **Operations switch with `tab`, not `←→`.** The arrows belong to the field: a step of the value.
 - **Letter keys work in a Cyrillic layout** (`с` is `c`, `д` is `l`). Otherwise half the keys are dead with that layout on.
 
-## Roadmap
+## What is left
 
-### Stage 2
-
-- **A frame in the terminal.** A frame at the position being chosen, drawn next to the fields. The frame comes from `ffmpeg -ss T -i IN -frames:v 1 -f image2pipe -`; a worker thread takes requests "latest wins", so a held arrow key does not queue up frames, and a small cache keeps the recent ones. Drawing is [ratatui-image](https://docs.rs/ratatui-image): it asks the terminal which protocol it speaks (kitty, iTerm2, sixel) and falls back to half blocks. It needs no system library, unlike chafa. Risks: tmux and ssh confuse protocol detection, and graphics protocols behave differently across terminals. The fallback is always there, and so is a switch to turn the preview off.
-- **gif**, with the palette pass that makes gifs look right. The long filter is where the highlight helps most: of the whole string only two numbers change.
-- **convert**: change the container by stream copy.
-- **Remove the audio**: a field in `compress`.
-
-### Stage 3
-
-- **speed** and **frame** (save one frame as an image).
-- **Defaults in a config file.**
-- **Interface language** switch, English and Russian.
-- **Joining files** is not designed yet: it needs a list of files, which the one-file form does not have.
+- **Joining files.** It needs a list of files, which the one-file form does not have, and checks that the files are compatible. Not designed yet.
+- **A Homebrew tap** and the first tagged release; see [release.md](release.md).
+- **Seeing the preview in terminals with graphics.** See the note under [Status](#status).
 
 ## Decisions on the open questions
 
@@ -249,6 +312,6 @@ as is:  ffmpeg -i IN -vn -c:a copy IN.m4a        the extension follows the codec
 | Show the start shift before the run | Yes, by looking up the keyframe in the background |
 | Which operations after compress and cut | audio in stage 1, gif in stage 2; resize is a field of compress |
 | A mode without the TUI | Yes: `--print` and `--run`, plus subcommands with options |
-| Presets in TOML | Stage 3, as defaults in a config file |
-| Language | English first; Russian as a switch inside the program |
+| Presets in TOML | Built as defaults in a config file |
+| Language | English first; Russian as a switch on the keys page |
 | Distribution | Homebrew with ffmpeg as a dependency; see [release.md](release.md) |

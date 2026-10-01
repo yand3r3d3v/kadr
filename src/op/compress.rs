@@ -31,11 +31,11 @@ pub fn resolution_label(r: Option<u32>) -> String {
 
 pub fn fields(v: &Values, info: &MediaInfo) -> Vec<FieldSpec> {
     let res = resolutions(info);
-    vec![
+    let mut fields = vec![
         FieldSpec {
             id: FieldId::Crf,
             label: "crf",
-            kind: Kind::Int { min: 0, max: 51, soft: (18, 28), big: 5 },
+            kind: Kind::Int { min: 0, max: 51, soft: (18, 28), step: 1, big: 5 },
             value: v.crf.to_string(),
             hint: "18 (better) to 28 (smaller file)",
             enabled: true,
@@ -70,7 +70,16 @@ pub fn fields(v: &Values, info: &MediaInfo) -> Vec<FieldSpec> {
             hint: "the frame height; the width follows",
             enabled: true,
         },
-    ]
+    ];
+    if info.audio.is_some() {
+        fields.push(inline(
+            FieldId::Sound,
+            "sound",
+            &[("keep", "re-encoded to aac, 128k"), ("remove", "the result is silent")],
+            v.sound,
+        ));
+    }
+    fields
 }
 
 pub fn build(v: &Values, info: &MediaInfo) -> CommandLine {
@@ -87,9 +96,14 @@ pub fn build(v: &Values, info: &MediaInfo) -> CommandLine {
         ]);
     }
     if info.audio.is_some() {
-        b.flag("-c:a", None).fixed("aac").flag("-b:a", None).fixed("128k");
+        let sound = Some(FieldId::Sound);
+        if v.sound == SOUND_REMOVE {
+            b.flag("-an", sound);
+        } else {
+            b.flag("-c:a", sound).fixed("aac").flag("-b:a", sound).fixed("128k");
+        }
     }
-    b.output(output_parts(OpKind::Compress, v, info, None))
+    b.output(OpKind::Compress, v, info)
 }
 
 #[cfg(test)]
@@ -117,11 +131,21 @@ mod tests {
     }
 
     #[test]
-    fn no_audio_no_audio_flags() {
+    fn no_audio_no_audio_flags_and_no_sound_field() {
         let mut info = lecture();
         info.audio = None;
         let v = Values::defaults(&info);
         assert!(!shell(&build(&v, &info)).contains("-c:a"));
+        assert!(fields(&v, &info).iter().all(|f| f.id != FieldId::Sound));
+    }
+
+    #[test]
+    fn removing_the_sound() {
+        let info = lecture();
+        let mut v = Values::defaults(&info);
+        v.sound = SOUND_REMOVE;
+        let s = shell(&build(&v, &info));
+        assert!(s.contains(" -an ") && !s.contains("-c:a"), "{s}");
     }
 
     #[test]
