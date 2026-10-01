@@ -1,325 +1,254 @@
-# kadr: архитектура, логика, этапы
+# kadr: architecture
 
-Дополнение к [design.md](design.md). Там про оформление, здесь про то, что программа делает, как она устроена внутри и в каком порядке её собирать. Как выпускать и ставить через Homebrew, написано в [release.md](release.md).
+What kadr does, how it is put together, and what comes next. The look and the voice are in [design.md](design.md); releasing and Homebrew are in [release.md](release.md).
 
-## Что уже сделано
+## What kadr is
 
-Состояние на 2026-10-01: первый этап написан. Работают «сжать», «вырезать» без кадра и «звук», выбор файла, список значений, прогон с отменой, экраны «готово», «файл уже есть» и «ffmpeg остановился», лист клавиш, вывод ffmpeg, заглушка для тесного окна, `--print` и `--run`.
+A form over ffmpeg. You pick a file and an operation, change a few fields, see the finished ffmpeg command below them, and run it without leaving the form.
 
-Проверено: 44 теста (сборка команд, разбор опций, клавиши формы, отрисовка экранов), плюс прогон на настоящем ролике через псевдотерминал и в режиме `--run`. Собирается на ffmpeg 9.0.2 и cargo 1.98.
+Three promises shape everything else:
 
-Чем код отличается от плана ниже:
+1. **The command on screen is the command that runs.** No hidden changes to the output, no temporary names. The one exception is named below, under [service flags](#service-flags).
+2. **Every field shows its piece of the command.** Focus on a field lights up its tokens.
+3. **kadr does not lie about the result.** If a cut starts somewhere other than where you asked, that is said before the run and after it.
 
-- **В форме есть поле `output`.** Экран «файл уже есть» предлагал поменять имя, а менять его было негде.
-- **`ui` и строки не разнесены по файлам.** Отрисовка лежит в одном `ui.rs`, строки интерфейса пока в коде рядом с местом показа. Отдельный `text.rs` появится вместе с русским языком.
-- **Отмена идёт через `q` в stdin ffmpeg**, а не сигналом: так ffmpeg завершается штатно, и не нужна зависимость от libc. Поэтому `-nostdin` в служебных флагах нет, а есть `-n`: ffmpeg никогда не перезапишет файл, если в показанной команде нет `-y`.
-- **Буфер обмена без крейта**: `pbcopy`, `wl-copy` или `xclip`, что найдётся.
-- **В «вырезать» нет курсора и клавиш `i` и `o`.** Без кадра курсору нечего показывать, поэтому стрелки двигают само поле `start` или `end`. Курсор появится на втором этапе вместе с кадром.
-- **Справка `--help` стандартная от clap**, а не свёрстанная как на холсте.
-- **Выбор файла без дополнения пути по `tab`**: каталоги открываются через `enter`.
+What kadr is not: a video editor, a player, a batch converter, or a wrapper around every ffmpeg flag.
 
-### Находка про ключевые кадры
+## Status
 
-Дизайн исходил из того, что в быстром режиме начало отрезка уезжает назад к ключевому кадру. Проверка на ffmpeg 9 показала, что это верно не для всех контейнеров:
+Stage one is built: `compress`, `cut` and `audio`, the file picker, value lists, the run screen with cancel, the done, file-exists and ffmpeg-stopped screens, the keys page, the ffmpeg output page, `--print` and `--run`.
 
-- **mkv и другие:** файл действительно начинается с ключевого кадра. Просили 7–12 с, получили 7 с ролика.
-- **mp4 и mov:** ffmpeg кладёт в файл кадры от ключевого, но пишет список правок (edit list), который их прячет. Плееры показывают ровно выбранные 5 с. Лишние кадры остаются в файле и видны только программам, которые список правок не читают.
+Verified by 44 tests (command building, option parsing, the form's keys, screen rendering), by driving the form through a pseudo-terminal on a real clip, and by `--run` on all three operations. Built against ffmpeg 9.0.2 and cargo 1.98.
 
-Поэтому подсказка под полями зависит от расширения результата: для mkv «starts at 00:00:05, the keyframe before it», для mp4 и mov «keeps 2.0 s from the keyframe before it, hidden from players». Экран «готово» ничего не предполагает: он меряет длину получившегося файла и сообщает о сдвиге, только если он есть.
+## Prior art
 
-На машине есть ffmpeg 9.0.2, ffprobe и cargo 1.98; mpv не установлен.
-
-## Что это за программа
-
-kadr это форма над ffmpeg. Пользователь выбирает файл и операцию, меняет несколько полей, а внизу видит готовую команду ffmpeg и может её запустить, не выходя из формы.
-
-Три обещания, из которых выводится остальное:
-
-1. **Команда на экране и есть то, что запустится.** Никаких скрытых правок вывода, временных имён и подмен. Исключение одно и оно названо ниже (служебные флаги прогресса).
-2. **Каждое поле показывает свой кусок команды.** Фокус на поле подсвечивает его токены. Так аргументы запоминаются.
-3. **kadr не врёт про результат.** Если начало отрезка уехало к ключевому кадру, это сказано до запуска и после.
-
-Чем kadr не является: не видеоредактор, не плеер, не пакетный конвертер, не обёртка над всеми флагами ffmpeg.
-
-## Что есть у других
-
-| Проект | Что это | Что берём | Чего там нет |
+| Project | What it is | What kadr takes | What it lacks |
 |---|---|---|---|
-| [lazycut](https://github.com/ozemin/lazycut) (Go, ~880 звёзд) | TUI только для обрезки: кадр через chafa, `i`/`o`, экспорт | Клавиши `, .` по кадру, `0` и `G` в начало и конец, `?` для справки, подкоманду без TUI (`lazycut trim --in --out`) | Других операций. Требует chafa как системную библиотеку. В обсуждении на HN главная жалоба: резка `-ss -i -t` неточная и программа об этом молчит |
-| [ffmpeg-command-builder](https://github.com/0xelitesystem/ffmpeg-command-builder) | Одна HTML-страница: 32 задачи, команда обновляется на лету, каждый флаг объяснён | Список задач как ориентир по востребованности. Пояснение к флагу рядом с полем | Не запускает ffmpeg и не видит файл |
-| LosslessCut | GUI для резки без перекодирования | Честность про ключевые кадры | Не терминал |
-| Десяток репозиториев `ffmpeg-tui` | Формы над ffmpeg, почти все без звёзд | Ничего: это списки флагов, а не задач | Связи поля с командой |
+| [lazycut](https://github.com/ozemin/lazycut) (Go) | A TUI for trimming only: a preview through chafa, `i`/`o` marks, export | Frame stepping with `,` `.`, `?` for help, a subcommand that works without the TUI | Other operations. It needs chafa as a system library. The main complaint in its Hacker News thread: `-ss -i -t` cuts are inexact and the tool does not say so |
+| [ffmpeg-command-builder](https://github.com/0xelitesystem/ffmpeg-command-builder) | One HTML page: 32 tasks, a command that updates live, every flag explained | The task list as a guide to what people need. A hint next to each field | It does not run ffmpeg and does not see the file |
+| LosslessCut | A GUI for cutting without re-encoding | Honesty about keyframes | Not a terminal |
+| A dozen `ffmpeg-tui` repositories | Forms over ffmpeg | Nothing: they are lists of flags, not of tasks | The link between a field and the command |
 
-Вывод: ниша «несколько частых задач, живая команда, честный результат» в терминале свободна. Отличие kadr от lazycut в том, что обрезка у нас одна из операций и она объясняет сдвиг к ключевому кадру.
+The niche "a few frequent tasks, a live command, an honest result" was open in the terminal.
 
-## Операции по востребованности
+## Operations by demand
 
-Замеров популярности у меня нет. Порядок ниже собран по тому, что стоит первым в шпаргалках и FAQ по ffmpeg и в списке задач ffmpeg-command-builder, и по жалобам в обсуждении lazycut. Это оценка, а не статистика.
+There are no measurements behind this order. It comes from what ffmpeg cheat sheets and FAQs put first and from the task list of ffmpeg-command-builder. It is an estimate.
 
-| № | Задача | Как часто нужна | Сложность у нас | Этап |
+| # | Task | How often | Cost for kadr | Stage |
 |---|---|---|---|---|
-| 1 | Сжать (вместе с уменьшением высоты и переводом в mp4) | Постоянно | Низкая | 1 |
-| 2 | Вырезать кусок | Постоянно | Средняя, с превью кадра высокая | 1 (без превью), 2 (превью) |
-| 3 | Достать звук | Часто | Низкая | 1 |
-| 4 | Gif из фрагмента | Часто | Низкая, таймлайн уже есть от «вырезать» | 2 |
-| 5 | Сменить контейнер без перекодирования (mov в mp4) | Часто | Низкая | 2 |
-| 6 | Убрать звук | Средне | Одно поле в «сжать» | 2 |
-| 7 | Склеить несколько файлов | Средне | Высокая: список файлов, проверка совместимости | 3 |
-| 8 | Ускорить или замедлить | Средне | Низкая | 3 |
-| 9 | Кадр в картинку | Средне | Низкая, если превью уже есть | 3 |
-| 10 | Вшить субтитры, обрезать края, повернуть | Редко | Средняя | 3 или никогда |
+| 1 | Compress, including a smaller frame and conversion to mp4 | All the time | Low | 1, done |
+| 2 | Cut a piece | All the time | Medium; high with a frame preview | 1 done without the frame; 2 adds it |
+| 3 | Extract the audio | Often | Low | 1, done |
+| 4 | A gif from a fragment | Often | Low, the timeline exists | 2 |
+| 5 | Change the container without re-encoding (mov to mp4) | Often | Low | 2 |
+| 6 | Remove the audio | Sometimes | One field in `compress` | 2 |
+| 7 | Speed up or slow down | Sometimes | Low | 3 |
+| 8 | Save one frame as an image | Sometimes | Low once the preview exists | 3 |
+| 9 | Join several files | Sometimes | High: a list of files, compatibility checks | 3, not designed yet |
+| 10 | Burn in subtitles, crop, rotate | Rarely | Medium | Maybe never |
 
-Что изменилось против холста: на вкладках нарисованы «сжать, вырезать, gif, звук». По востребованности «звук» идёт раньше «gif», и он дешевле. Предлагаю порядок вкладок оставить как на холсте, а делать в порядке этапов; несделанная вкладка в первой версии просто не показывается.
+There is no separate "resize" operation: it is the `resolution` field of `compress`.
 
-Отдельная операция «ресайз» не нужна: это поле «высота» в «сжать».
+## Command line
 
-## Интерфейс командной строки
-
-Проблема: на холсте `--help` показывал `kadr [файл]` и операции «сжать», «вырезать» рядом с английской командой. Это выглядело как русские аргументы у английской программы.
-
-Решение: **первая версия целиком на английском**: опции, справка, форма, сообщения. Все листы холста переведены. Русский появится позже как выбор языка внутри программы (третий этап): строки с самого начала лежат в одном модуле `text.rs`, так что это второй набор строк и одна настройка, а не переделка. Имена операций и опций в шелле остаются английскими при любом языке формы.
-
-В этом документе экраны и поля ниже названы по-русски для краткости. Соответствие: сжать это `compress`, вырезать это `cut`, звук это `audio`; поля `file`, `crf`, `preset`, `resolution`, `start`, `end`, `length`, `mode` (`fast`, `exact`), `format` (`mp3`, `as is`), `quality`, `fps`, `width`.
-
-Поле «высота» переименовано в `resolution` со значениями `source`, `1080p`, `720p`, `480p`. Смысл тот же: высота кадра в пикселях, ширина подбирается сама. В команде это `-vf scale=-2:720`, и при фокусе на поле подсвечивается число `720`. Слово «высота» сбивало: то же самое все называют разрешением и пишут как 720p.
+Everything is English: operations, options, help, the form. A second interface language, Russian, is planned as a switch inside the program; operation and option names stay English in any language.
 
 ```
-kadr [FILE]                       открыть форму; без файла сначала выбор файла
-kadr <OPERATION> FILE [OPTIONS]   открыть форму на этой операции с заполненными полями
+kadr [FILE]                       open the form; without a file, the picker first
+kadr <OPERATION> FILE [OPTIONS]   open the form on that operation, fields filled in
 
-compress  --crf N  --preset NAME  --resolution 720p -o OUT
-cut       --from T --to T         --exact           -o OUT
-audio     --format mp3|copy       --quality N       -o OUT
-gif       --from T --length S --fps N --width N     -o OUT
+compress  --crf N  --preset NAME  --resolution 720p   -o OUT
+cut       --from T --to T         --exact             -o OUT
+audio     --format mp3|copy       --quality N         -o OUT
 
---print     собрать команду, напечатать и выйти
---run       запустить сразу, без формы, с линейкой прогресса в одну строку
--y, --yes   перезаписывать без вопроса
+--print     build the command, print it, exit
+--run       run right away, without the form
+-y, --yes   overwrite without asking
 ```
 
-Имена опций совпадают с подписями полей формы, а не с флагами ffmpeg: `--resolution`, а не `--vf`. Время принимается как `38`, `0:38`, `00:00:38` и `38.5`.
+Option names follow the form's field labels, not the ffmpeg flags: `--resolution`, not `--vf`. Time is accepted as `38`, `0:38`, `00:00:38` or `38.5`.
 
-`--print` без формы делает kadr пригодным для скриптов и для вставки в README. `--run` нужен тем, кто уже знает значения.
+`resolution` is the frame height in pixels with the width following automatically. It is called that, and written `720p`, because that is what people call it. In the command it is `-vf scale=-2:720`, and focus on the field lights up the `720`.
 
-## Экраны
-
-На холсте теперь 17 листов. Девять было, восемь добавлено, `--help` переписан.
-
-| Экран | Лист | Когда | Этап |
-|---|---|---|---|
-| Выбор файла | Start (новый) | `kadr` без аргумента или клавиша `f` | 1 |
-| Форма «сжать» | Main | | 1 |
-| Список значений в поле | Select (новый) | пробел на поле с перечнем (пресет, формат) | 1 |
-| Прогон | Run | | 1 |
-| Готово | Done | | 1 |
-| Файл уже есть | Error | перед запуском | 1 |
-| ffmpeg остановился | Failed (новый) | ненулевой код выхода | 1 |
-| Форма «звук» | Audio (новый) | | 1 |
-| «Вырезать» без графики | CutFallback | на этапе 1 без кадра: только поля и таймлайн | 1 |
-| Результат «вырезать» | CutResult | | 1 |
-| Клавиши | Keys (новый) | `?` | 1 |
-| Окну тесно | Small (новый) | окно меньше 80×24 | 1 |
-| `--help` | Help (переписан) | | 1 |
-| `--print`, `--run`, нет ffmpeg | Plain (новый) | вне формы | 1 |
-| «Вырезать» с кадром | CutMain | | 2 |
-| Форма «gif» | Gif (новый) | | 2 |
-| Знак и палитра | Identity | справочный лист | |
-
-Чего на холсте всё ещё нет и что стоит дорисовать, когда дойдёт до дела: прогон для «вырезать» (отличается только длиной линейки), вывод ffmpeg по клавише `l`, поле с ошибкой ввода (например, конец раньше начала).
-
-Изменения в клавишах против старых листов:
-
-- Операции переключает `tab`, а не `←→`. Стрелки влево и вправо нужны полю: шаг значения и движение по таймлайну. Подсказки на листах исправлены.
-- У `⇧←→` есть запасные `H` и `L`: часть терминалов shift со стрелками не передаёт.
-- Буквенные клавиши работают и в русской раскладке (`ш` это `i`, `щ` это `o`). Иначе при включённой русской раскладке половина клавиш молчит.
-- `c` копирует команду в буфер обмена.
-
-## Состояния
+## States
 
 ```
-           ┌──────────┐  файл выбран  ┌────────┐
- запуск ──▶│  выбор   │──────────────▶│ форма  │◀──────────────┐
-           │  файла   │◀──────────────│        │               │
-           └──────────┘       f       └───┬────┘               │
-                                          │ enter              │
-                                  выход есть? ──да──▶ «файл уже есть» ─ esc ─┤
-                                          │ нет, или нажато o                │
-                                          ▼                                  │
-                                     ┌─────────┐  esc: отмена                │
-                                     │ прогон  │─────────────────────────────┤
-                                     └──┬───┬──┘                             │
-                              код 0     │   │  код не 0                      │
-                                        ▼   ▼                                │
-                                  «готово» «ffmpeg остановился» ── esc ──────┘
+          ┌──────────┐  file chosen  ┌────────┐
+ start ──▶│  picker  │──────────────▶│  form  │◀──────────────┐
+          │          │◀──────────────│        │               │
+          └──────────┘       f       └───┬────┘               │
+                                         │ enter              │
+                                output exists? ──yes──▶ "file exists" ── esc ──┤
+                                         │ no, or o pressed                    │
+                                         ▼                                     │
+                                    ┌─────────┐  esc: cancel                   │
+                                    │   run   │────────────────────────────────┤
+                                    └──┬───┬──┘                                │
+                             code 0    │   │  code not 0                       │
+                                       ▼   ▼                                   │
+                                  "done"  "ffmpeg stopped" ── esc ─────────────┘
 ```
 
-Поверх любого состояния могут лежать: список значений поля, лист клавиш, вывод ffmpeg, заглушка «окну тесно».
+Over any state there can be: a field's value list, the keys page, the ffmpeg output, the "too small" page.
 
-Если kadr запущен с файлом, выбор файла пропускается. Если с `--print` или `--run`, формы нет вовсе.
+Started with a file, kadr skips the picker. Started with `--print` or `--run`, there is no form at all.
 
-## Устройство
+## Structure
 
-Один исполняемый файл, без async-рантайма. Главный поток рисует и читает клавиши, рабочие потоки шлют события в один канал `mpsc`.
+One executable, no async runtime. The main thread draws and handles events; worker threads send events into a single `mpsc` channel.
 
 ```
 src/
-  main.rs        разбор аргументов, выбор режима: форма, --print, --run
-  cli.rs         clap; аргументы превращаются в начальные значения полей
-  probe.rs       ffprobe -of json → MediaInfo
+  main.rs      argument parsing, choice of mode: form, --print, --run
+  cli.rs       clap; options become initial field values
+  probe.rs     ffprobe -of json → MediaInfo; keyframe lookup
   op/
-    mod.rs       Operation, FieldSpec, Token, сборка команды
-    compress.rs  ┐
-    cut.rs       │ по файлу на операцию: поля, значения по умолчанию,
-    audio.rs     │ проверки, build(), имя выходного файла
-    gif.rs       ┘
-  form.rs        значения полей, фокус, шаги, ввод, проверки
-  run.rs         запуск ffmpeg, разбор -progress, отмена, хвост stderr
-  preview.rs     кадр по времени: очередь, кэш, протокол терминала (этап 2)
-  app.rs         состояние, обработка событий, переходы
-  ui/
-    theme.rs     палитра, truecolor или ANSI-16
-    command.rs   рамка «команда»: перенос, подсветка токенов поля в фокусе
-    ruler.rs     линейка ┣━━◆┈┈┫ для прогресса и для отрезка
-    form.rs, tabs.rs, keys.rs, picker.rs, screens.rs
-  text.rs        все строки интерфейса
+    mod.rs     operation kinds, FieldSpec, command parts, the builder
+    compress.rs, cut.rs, audio.rs
+               one file per operation: fields, checks, build()
+  command.rs   the command frame: wrapping, lighting up the focused pieces
+  run.rs       starting ffmpeg, parsing -progress, cancel, the stderr tail
+  picker.rs    the file list
+  app.rs       state, event handling, transitions
+  ui.rs        drawing
+  plain.rs     --print and --run
+  theme.rs     the palette, truecolor or ANSI-16
+  util.rs      time, size and shell formatting
 ```
 
-### Ядро: операция как описание
+### The core: an operation as data
 
-Вся ценность программы в том, что поле и кусок команды связаны. Поэтому операция это данные, а не код рисования:
+The whole value of the program is that a field and a piece of the command are linked. So an operation is data, not drawing code:
 
 ```rust
-struct FieldSpec { id: FieldId, label: &'static str, kind: Kind, hint: &'static str }
+struct FieldSpec { id: FieldId, label: &'static str, kind: Kind, value: String, hint: &'static str, enabled: bool }
 
 enum Kind {
     File,
-    Int { min: i64, max: i64, step: i64, big_step: i64 },
-    Choice(&'static [ChoiceItem]),   // значение и пояснение к нему
-    Time,                            // в пределах длительности файла
+    Int { min: i64, max: i64, soft: (i64, i64), big: i64 },
+    Choice { items: Vec<Choice>, selected: usize, inline: bool },
+    Time,
+    Text,
+    Info,
 }
 
-struct Token { text: String, role: Role, field: Option<FieldId> }
+struct Part { text: String, role: Role, field: Option<FieldId> }
 enum Role { Program, Flag, Fixed, Value, Output }
 
-trait Operation {
-    fn fields(&self, info: &MediaInfo) -> Vec<FieldSpec>;
-    fn defaults(&self, info: &MediaInfo) -> Values;
-    fn check(&self, v: &Values, info: &MediaInfo) -> Vec<Problem>;
-    fn build(&self, v: &Values, info: &MediaInfo) -> Vec<Token>;
-}
+struct Arg { parts: Vec<Part>, is_output: bool }   // one argv entry
 ```
 
-`build()` чистая функция. Из одного списка токенов получаются:
+`build(op, values, info)` is a pure function from field values and file facts to a `Vec<Arg>`. One argument can hold several parts: in `scale=-2:720` only `720` belongs to a field. From that one list come:
 
-- рамка «команда» (роль задаёт цвет, `field` задаёт подсветку при фокусе);
-- `argv` для запуска (тексты токенов как есть, без шелла);
-- строка для `--print` и для копирования (с кавычками там, где в аргументе есть пробел или `;[]`).
+- the command frame (the role sets the colour, `field` sets the highlight on focus);
+- `argv` for the run (part texts joined, no shell involved);
+- the string for `--print` and for copying (quoted where an argument needs it).
 
-Один выбор может дать несколько токенов: «формат: как есть» в «звук» меняет и `-c:a copy`, и расширение `.m4a`. Оба токена несут один `FieldId` и подсвечиваются вместе (лист Audio).
+Because all three come from the same list, they cannot disagree.
 
-Тесты ядра это снимки: значения полей на входе, строка команды на выходе. Терминал для них не нужен.
+One choice can produce several parts. The audio format `as is` changes both `-c:a copy` and the `.m4a` extension; both carry the same `FieldId` and light up together.
 
-### Служебные флаги
+The core is tested with snapshots: field values in, command string out. No terminal is needed.
 
-При запуске к команде добавляются `-hide_banner -nostats -progress pipe:1` и, если в команде нет `-y`, ещё `-n`. Они не меняют результат и в рамке не показываются, иначе команда на экране утонет в шуме. Это единственное расхождение между показанным и запущенным; о нём сказано на листе клавиш и в README. `-y` появляется в команде только после того, как пользователь нажал `o` на экране «файл уже есть».
+### Service flags
 
-### Запуск
+At run time kadr adds `-hide_banner -nostats -progress pipe:1`, and `-n` when the command has no `-y`. They do not change the result and are not shown in the frame, where they would bury the command in noise. This is the only gap between what is shown and what is run, and it is stated on the keys page and in the README.
 
-- `run.rs` порождает ffmpeg, читает `stdout` построчно: `out_time_us`, `fps`, `speed`, `total_size`, `progress=end`.
-- `stderr` копится в кольцевой буфер на последние 200 строк. Он нужен для экрана «ffmpeg остановился» и для клавиши `l`.
-- Доля прогресса считается от длины результата, а не файла: для «вырезать» и «gif» это длина отрезка.
-- Отмена: в stdin ffmpeg пишется `q`, через две секунды процесс убивается, если не вышел сам. Недописанный выходной файл удаляется, потому что создал его kadr. Если файл существовал до запуска и был перезаписан, он уже потерян; об этом предупреждает экран «файл уже есть».
-- При панике и при выходе терминал возвращается в обычный режим (хук паники плюс guard).
+`-y` appears in the command only after the user pressed `o` on the "file exists" screen, or passed `-y` on the command line.
 
-### Проба файла
+### Running
 
-`ffprobe -v error -show_format -show_streams -of json` один раз при выборе файла. Из неё: длительность, размер, кодеки, разрешение, частота кадров, есть ли видео и звук. От этого зависят поля:
+- `run.rs` spawns ffmpeg and reads `stdout` line by line: `out_time_us`, `fps`, `speed`, `total_size`, `progress=`.
+- `stderr` goes into a ring buffer of the last 200 lines, for the "ffmpeg stopped" screen and for the `l` key.
+- Progress is counted against the length of the result, not of the input: for a cut that is the length of the piece.
+- Cancel writes `q` to ffmpeg's stdin, so it exits the way it would for a person; after two seconds a process still running is killed. This needs no signal handling and no libc.
+- An unfinished output is removed, because kadr created it. If the file existed before and was being overwritten, it is already gone; the "file exists" screen is the warning.
+- The terminal is restored on exit and on panic.
 
-- нет звука: вкладка «звук» недоступна, в «сжать» пропадают `-c:a aac -b:a 128k`;
-- нет видео: доступен только «звук»;
-- высота исходника 720: в списке высот нет 1080, увеличивать kadr не предлагает.
+### Probing
 
-Ключевые кадры читаются отдельно и только для «вырезать», в фоне, в окне вокруг выбранного начала (`-read_intervals`), чтобы не разбирать двухчасовой файл целиком.
+`ffprobe -v error -show_format -show_streams -of json`, once when a file is chosen. From it: duration, size, codecs, frame size, frame rate, whether there is video and audio. The fields depend on it:
 
-## Логика операций
+- no audio: the `audio` tab is unavailable, and `compress` drops `-c:a aac -b:a 128k`;
+- no video: only `audio` is available;
+- a 720p source: `1080p` is not offered. kadr never suggests scaling up.
 
-### Сжать
+Cover art in an mp3 is a video stream to ffprobe; kadr does not count it.
+
+## Operations
+
+### compress
 
 ```
 ffmpeg -i IN -c:v libx264 -crf 23 -preset medium -vf scale=-2:720 -c:a aac -b:a 128k IN_small.mp4
 ```
 
-- crf от 18 до 28, шаг 1; ввод цифрами допускает от 0 до 51 и красит значение кармином вне разумных границ.
-- пресет: список из листа Select.
-- resolution: `source`, `1080p`, `720p`, `480p`. `source` убирает `-vf` из команды совсем.
-- этап 2: поле «звук: оставить / убрать» (`-an`).
-- Размер результата заранее не предсказать, crf его не задаёт. Обещать оценку нельзя; на прогоне показывается текущий размер.
+- `crf` steps by 1; arrows and typing allow 0 to 51, and a value outside 18 to 28 turns carmine.
+- `preset` opens as a list with a line about each speed.
+- `resolution` is `source`, `1080p`, `720p` or `480p`. `source` removes `-vf` from the command altogether.
+- The size of the result cannot be predicted from `crf`, so kadr does not promise an estimate. The run screen shows the size so far.
 
-### Вырезать
-
-```
-быстро:  ffmpeg -ss A -to B -i IN -c copy IN_cut.EXT
-точно:   ffmpeg -ss A -to B -i IN -c:v libx264 -crf 18 -c:a aac IN_cut.mp4
-```
-
-- В быстром режиме начало уезжает назад к ключевому кадру. Ответ на открытый вопрос из дизайна: **показывать сдвиг до запуска**. Как только ключевые кадры вокруг начала прочитаны, под полем «начало» появляется строка «начнётся с 00:00:36», а на линейке метка. После запуска экран CutResult подтверждает это по факту (`ffprobe` результата).
-- Проверки: конец позже начала, оба в пределах файла.
-- Этап 1: поля и линейка, время вводится цифрами и стрелками. Этап 2: кадр.
-
-### Звук
+### cut
 
 ```
-mp3:      ffmpeg -i IN -vn -c:a libmp3lame -q:a 2 IN.mp3
-как есть: ffmpeg -i IN -vn -c:a copy IN.m4a      расширение по кодеку дорожки
+fast:   ffmpeg -ss A -to B -i IN -c copy IN_cut.EXT
+exact:  ffmpeg -ss A -to B -i IN -c:v libx264 -crf 18 -c:a aac IN_cut.mp4
 ```
 
-### Gif (этап 2)
+Checks: the end is after the start, and both are inside the file.
+
+### Keyframes and fast cuts
+
+A stream copy can only begin at a keyframe. The design assumed this always makes the result start earlier than asked. Testing on ffmpeg 9 showed that it depends on the container:
+
+- **mkv and others:** the file does start at the keyframe. Asked for 7 to 12 s with keyframes every 5 s, the result is 7 seconds long and starts at 5 s.
+- **mp4 and mov:** ffmpeg writes the frames from the keyframe on, plus an edit list that hides them. Players show exactly the 5 seconds chosen. The extra frames stay in the file and are visible only to software that ignores edit lists.
+
+So the note under the fields depends on the extension of the output: `starts at 00:00:05, the keyframe before it` for mkv, `keeps 2.0 s from the keyframe before it, hidden from players` for mp4 and mov. The keyframe is looked up in the background with `ffprobe -skip_frame nokey -read_intervals` around the chosen start, so a two-hour file is not scanned whole, and only after the start has stopped changing for a quarter of a second.
+
+The done screen assumes nothing: it measures the length of the file that came out and reports a shift only if there is one, with `t` to cut again in exact mode.
+
+### audio
 
 ```
-ffmpeg -ss A -t D -i IN -vf "fps=12,scale=480:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse" -loop 0 IN.gif
+mp3:    ffmpeg -i IN -vn -c:a libmp3lame -q:a 2 IN.mp3
+as is:  ffmpeg -i IN -vn -c:a copy IN.m4a        the extension follows the codec
 ```
 
-Длинный фильтр это как раз случай, где подсветка полезнее всего: видно, что из всей строки меняются только `12` и `480`. Длина ограничена сверху (скажем, 30 с) с предупреждением: gif на минуту весит сотни мегабайт.
+## Where the code departs from the canvas
 
-## Кадр в терминале (этап 2)
+- **The form has an `output` field.** The "file exists" screen offered to change the name and there was nowhere to change it.
+- **`cut` has no cursor and no `i`/`o` keys yet.** Without a frame a cursor has nothing to show, so the arrows move `start` or `end` directly. The cursor comes with the frame preview.
+- **`--help` is clap's standard help**, not the layout drawn on the canvas.
+- **The picker has no path completion on `tab`.** Folders open with `enter`.
+- **Operations switch with `tab`, not `←→`.** The arrows belong to the field: a step of the value.
+- **Letter keys work in a Cyrillic layout** (`с` is `c`, `д` is `l`). Otherwise half the keys are dead with that layout on.
 
-Самая рискованная часть, поэтому она отделена от «вырезать» и идёт вторым этапом.
+## Roadmap
 
-- Кадр: `ffmpeg -ss T -i IN -frames:v 1 -vf scale=480:-1 -f image2pipe -vcodec png -`. С `-ss` перед `-i` это десятки миллисекунд на локальном диске, но не мгновенно.
-- Рабочий поток с очередью «побеждает последний»: пока курсор едет, промежуточные запросы выбрасываются. Кэш на несколько десятков кадров.
-- Показ: [ratatui-image](https://docs.rs/ratatui-image/latest/ratatui_image/). `Picker::from_query_stdio()` сам спрашивает терминал: kitty, iTerm2, sixel, иначе полублоки. Системных библиотек не требует, в отличие от chafa у lazycut.
-- Риски: tmux и ssh ломают определение протокола; в WezTerm надёжно работает только протокол iTerm2; перерисовка картинки при каждом кадре ratatui может мерцать. Запасной выход всегда есть: полублоки (лист CutFallback) и переменная `KADR_PREVIEW=off`.
-- Путь с mpv из дизайн-документа не берём: mpv не стоит, по ssh не работает, а кадр в терминале закрывает ту же задачу.
+### Stage 2
 
-## Этапы и трудозатраты
+- **A frame in the terminal.** A frame at the position being chosen, drawn next to the fields. The frame comes from `ffmpeg -ss T -i IN -frames:v 1 -f image2pipe -`; a worker thread takes requests "latest wins", so a held arrow key does not queue up frames, and a small cache keeps the recent ones. Drawing is [ratatui-image](https://docs.rs/ratatui-image): it asks the terminal which protocol it speaks (kitty, iTerm2, sixel) and falls back to half blocks. It needs no system library, unlike chafa. Risks: tmux and ssh confuse protocol detection, and graphics protocols behave differently across terminals. The fallback is always there, and so is a switch to turn the preview off.
+- **gif**, with the palette pass that makes gifs look right. The long filter is where the highlight helps most: of the whole string only two numbers change.
+- **convert**: change the container by stream copy.
+- **Remove the audio**: a field in `compress`.
 
-Оценка в рабочих днях для одного человека, который знает Rust и уже пользовался ratatui. Без такого опыта умножай на полтора.
+### Stage 3
 
-| Этап | Что входит | Дни |
-|---|---|---|
-| **1а. Скелет и «сжать»** | проект, clap, тема с откатом в ANSI-16, цикл событий, проба файла, ядро `Operation` и токены, рамка команды с подсветкой, форма, список значений, запуск с прогрессом, «готово», «файл уже есть», «ffmpeg остановился», отмена | 4–5 |
-| **1б. «Звук» и «вырезать» без кадра** | поле времени, линейка с отрезком, режимы быстро и точно, ключевые кадры и сдвиг до и после запуска | 2–3 |
-| **1в. Обвязка** | выбор файла, лист клавиш, «окну тесно», русская раскладка, копирование команды, `--print` и `--run`, снимочные тесты команд, README | 2 |
-| **Итого этап 1** | три самые частые операции, всё работает по ssh в любом терминале | **8–10** |
-| **2. Кадр и gif** | превью кадра с кэшем и откатом, gif, смена контейнера, «убрать звук» | 4–5 |
-| **3. По запросу** | склейка, скорость, кадр в картинку, пресеты в TOML, русский язык формы с переключением внутри программы | 1–3 на каждую |
+- **speed** and **frame** (save one frame as an image).
+- **Defaults in a config file.**
+- **Interface language** switch, English and Russian.
+- **Joining files** is not designed yet: it needs a list of files, which the one-file form does not have.
 
-Самое трудное по порядку убывания: превью кадра (терминалы ведут себя по-разному), линейка с отрезком и поле времени (много мелких случаев ввода), перенос и подсветка команды в рамке. Остальное рутинно.
+## Decisions on the open questions
 
-Крейты: `ratatui`, `crossterm`, `clap`, `serde` и `serde_json` (ffprobe), `anyhow`, `arboard` (буфер обмена), на этапе 2 `ratatui-image` и `image`. `tui-input` не нужен: поля короткие, свой ввод проще.
-
-## Решения по открытым вопросам из дизайна
-
-| Вопрос | Решение |
+| Question | Decision |
 |---|---|
-| mpv или кадр в терминале | Кадр в терминале, на втором этапе. mpv не берём |
-| Показывать сдвиг начала до запуска | Да, ключевые кадры читаются в фоне вокруг начала |
-| Какие операции после «сжать» и «вырезать» | «Звук» в первый этап, «gif» во второй, «ресайз» это поле в «сжать» |
-| Режим без TUI | Да: `--print` и `--run`, плюс подкоманды с опциями |
-| Пресеты в TOML | Третий этап. Сначала зашитые значения по умолчанию |
-
-## Что осталось решить тебе
-
-Решено 2026-10-01: всё на английском, русский позже переключателем внутри программы; первый этап это «сжать», «вырезать» без кадра и «звук»; ставиться будет через Homebrew с ffmpeg в зависимостях.
-
-Для выпуска нужны два решения, они описаны в [release.md](release.md): под каким именем репозиторий будет на GitHub и какая лицензия.
+| mpv or a frame in the terminal | A frame in the terminal. mpv does not work over ssh |
+| Show the start shift before the run | Yes, by looking up the keyframe in the background |
+| Which operations after compress and cut | audio in stage 1, gif in stage 2; resize is a field of compress |
+| A mode without the TUI | Yes: `--print` and `--run`, plus subcommands with options |
+| Presets in TOML | Stage 3, as defaults in a config file |
+| Language | English first; Russian as a switch inside the program |
+| Distribution | Homebrew with ffmpeg as a dependency; see [release.md](release.md) |

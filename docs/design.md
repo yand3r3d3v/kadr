@@ -1,125 +1,103 @@
-# kadr: проект
+# kadr: design
 
-TUI-надстройка над ffmpeg на Rust (ratatui). Форма с полями, а снизу живая сборка итоговой команды, чтобы не заучивать аргументы.
+How kadr looks and sounds. What it does and how it is built is in [architecture.md](architecture.md).
 
-Подпись: «команда ffmpeg, собранная на глазах».
+kadr is a terminal form over ffmpeg. Its tagline: **the ffmpeg command, assembled as you watch.**
 
-## Статус
+The screens are drawn on a design canvas, "kadr в терминале", 17 artboards. The code follows them, with the differences listed in [architecture.md](architecture.md#where-the-code-departs-from-the-canvas).
 
-- **Код:** первый этап написан: «сжать», «вырезать» без кадра, «звук». Что сделано и чем оно отличается от плана, сказано в [architecture.md](architecture.md).
-- **Язык:** интерфейс, справка и опции командной строки сначала на английском. Русский появится позже как выбор языка внутри программы. Русские подписи и сообщения ниже в этом документе описывают смысл, на холсте они уже английские (`compress`, `cut`, `gif`, `audio`).
-- **Дизайн:** холст «kadr в терминале» в Claude, 17 листов: формы всех четырёх операций, выбор файла, прогон, готово, ошибки, клавиши, `--help`, работа без интерфейса, знак с палитрой.
-- **Не сделано:** превью кадра, интерактивный таймлайн, операции «gif» и «звук», пресеты в TOML.
+## The concept: a blueprint
 
-## Оформление
+The command comes together in front of you like a part on a blueprint. Everything else in the look stays quiet so that one thing can be seen: which field makes which piece of the command.
 
-Концепция: **чертёж**. Команда собирается на глазах, как деталь на синьке.
+- Flags in the command are dimmed, values glow ochre.
+- The field in focus brightens and underlines its own piece: on `crf` it is `-crf 23`, on `start` it is `-ss 00:00:38`.
+- A choice that changes two places lights up both. The audio format changes the codec and the file extension.
 
-### Имя и знак
+This is how the flags get remembered without being memorised.
 
-- Имя: **kadr** (кадр), строчными.
-- Знак: рамка видоискателя, `⌜ kadr ⌟`. Короткий, влезает в заголовок окна, в `--version` и в README.
+## Name and mark
 
-### Палитра
+- The name is **kadr** (кадр, "frame"), lowercase.
+- The mark is a viewfinder frame: `⌜ kadr ⌟`. It is short enough for a window title, `--version` and a README.
 
-Название цвета говорит, зачем он нужен.
+## Palette
 
-| Имя | Hex | Роль |
+A colour's name says what it is for.
+
+| Name | Hex | Role |
 |---|---|---|
-| Синька | `#0F2A4A` | Фон, если приложение красит своё. По умолчанию берётся фон терминала |
-| Белила | `#E8EEF5` | Основной текст |
-| Лёд | `#7FB8E6` | Рамки, подписи полей, пройденная часть таймлайна |
-| Охра | `#E3A72F` | Всё, что можно менять: значения, фокус, курсор, границы отрезка |
-| Кармин | `#F0627A` | Ошибка и риск |
+| Blueprint | `#0F2A4A` | Background, if the app paints its own. By default the terminal's background is used |
+| Chalk | `#E8EEF5` | Main text |
+| Ice | `#7FB8E6` | Frames, field labels, the part already done |
+| Ochre | `#E3A72F` | Everything you can change: values, focus, cursor, the ends of a piece |
+| Carmine | `#F0627A` | Error and risk |
 
-Оттенки для второстепенного: `#8A9BB0` для флагов в команде и подсказок, `#4A7BA6` для тонких линий и рамок.
+Two more shades for secondary things: `#8A9BB0` for flags in the command and for hints, `#4A7BA6` for thin lines.
 
-Кармин осветлён с `#D6455D`: на синьке текст ошибки давал контраст 3.4 вместо нужных 4.5.
+Carmine was lightened from `#D6455D`: on the blueprint background the error text had a contrast of 3.4 where 4.5 is needed.
 
-Если терминал не умеет truecolor, цвета сворачиваются в ANSI-16: лёд это cyan, охра это yellow, кармин это red, белила это цвет текста по умолчанию.
+Without truecolor the colours fold into ANSI-16: ice is cyan, ochre is yellow, carmine is red, chalk is the terminal's default text colour.
 
-### Главная идея: связь поля с командой
+The first plan was "dark background and one bright accent". That is a template that would fit any ffmpeg tool, so it was dropped. Colour now carries a function: ochre means "you can change this", carmine means "careful".
 
-- Флаги в превью команды приглушены, значения светятся охрой.
-- Фокус на поле подсвечивает и подчёркивает свой кусок команды: на поле «crf» подсвечен `-crf 23`, на поле «начало» подсвечен `-ss 00:00:38`.
-- Так видно, какой кусок команды что делает, и аргументы запоминаются без зубрёжки.
-- Остальное оформление молчит, чтобы эта связь работала.
+## Layout
 
-### Экраны (на холсте)
+- Everything is aligned to the left edge; field labels form a column.
+- Frames are thin, like lines on a drawing.
+- Progress is a timeline ruler, `┣━━◆┈┈┫`, with a timecode. Not a block gauge.
+- The active tab is underlined, not inverted.
+- The keys for the current screen sit on the bottom row.
 
-- Форма «сжать», прогон, готово, ошибка (файл уже существует).
-- `kadr --help` на обычном фоне терминала, чтобы было видно, что без синьки всё читается.
-- Лист со знаком, палитрой, ANSI-фолбэком и набором знаков.
+The marks the interface is built from:
 
-Общее:
-- Выравнивание по левому краю, подписи полей в колонку.
-- Рамки тонкие, как линии чертежа.
-- Прогресс в виде линейки таймлайна `┣━━◆┈┈┫` с таймкодом, а не блока `Gauge`.
-- Активная вкладка подчёркнута, без инверсии.
+| Mark | Meaning |
+|---|---|
+| `⌜ ⌟` | the viewfinder frame |
+| `┣━━◆┈┈┫` | the timeline |
+| `[` `]` | the ends of a chosen piece |
+| `▎` `▏` | row focus and the text cursor |
+| `✓` `✕` | done and error |
 
-### Голос
+## Voice
 
-Подписи и вкладки строчными, сообщения как обычные предложения. Короткие глаголы, без «→» и без извинений. Ошибка говорит, что случилось и как это исправить.
+Labels and tabs are lowercase. Messages are ordinary sentences. Short verbs, no arrows and no apologies. An error says what happened and how to fix it.
 
-- Успех: `Готово: lecture_04_small.mp4`, ниже было и стало: `48 МБ`, `12 МБ`, `на 75% меньше`.
-- Ошибка: `Файл lecture_04_small.mp4 уже есть. Нажми o, чтобы перезаписать, или поменяй имя.`
+- Success: `✓ Done: lecture_04_small.mp4`, then before and after: `48 MB`, `12 MB`, `75% smaller`.
+- Error: `lecture_04_small.mp4 already exists. Press o to overwrite it, or change the name.`
 
-### Что менялось в плане
+The interface is English first. A second language, Russian, is chosen inside the program. Operation and option names in the shell stay English in any language.
 
-Первый вариант был «тёмный фон и один яркий акцент». Это шаблон, он подошёл бы любому ffmpeg-инструменту, поэтому от него отказались. Цвет теперь несёт функцию: охра значит «можно менять», кармин значит «опасно».
+## Screens
 
-## Вырезать с превью кадра
+| Screen | When |
+|---|---|
+| File picker | kadr starts without a file, or `f` |
+| The form | one per operation |
+| Value list | `space` on a field with many values, such as the preset |
+| Run | ffmpeg is working: ruler, speed, size |
+| Done | before and after sizes; for a cut, what was asked and what came out |
+| File exists | before a run that would overwrite |
+| ffmpeg stopped | a non-zero exit: its last lines, and what was cleaned up |
+| Keys | `?` |
+| ffmpeg output | `l` |
+| Too small | the window is under 80×24 |
 
-### Проблема
+## Cut with a frame preview
 
-Для «вырезать» время начала и конца приходится вводить вслепую: видео нельзя посмотреть и найти нужный момент.
+Choosing the start and end of a piece blind is the hard part of cutting: you cannot see the video to find the moment.
 
-### Два пути
+The answer on the canvas is a frame of the video drawn in the terminal next to the fields, taken at the position being chosen. It works over ssh in terminals with graphics (kitty, WezTerm, iTerm2, ghostty, foot) and falls back to half-block characters everywhere else. The rest of the screen stays the same.
 
-1. **Плеер снаружи (дёшево).** kadr запускает `mpv --input-ipc-server=/tmp/kadr.sock файл`. Клавиши `i` и `o` в kadr спрашивают у mpv позицию командой `{"command":["get_property","time-pos"]}` по сокету и подставляют её в «начало» и «конец». Примерно час работы. Не работает по ssh на сервере без графики.
-2. **Кадр прямо в терминале.** Над таймлайном показывается кадр на позиции курсора, курсор двигается клавишами. Работает по ssh в терминалах с графикой (kitty, WezTerm, iTerm2, ghostty, foot), в остальных рисуется полублоками.
+- The frame is on the left with its timecode under it; the fields are on the right.
+- The timeline runs the full width below: `[` and `]` are the ends of the piece in ochre, `━` between them in ice, `◆` is the cursor.
+- The command at the bottom is rebuilt on every move.
 
-На холсте проработан второй путь.
+An earlier idea was to drive an external player, mpv, over its IPC socket. It was cheaper but does not work over ssh, so it was dropped.
 
-### Как выглядит
+### Fast and exact
 
-- Слева кадр, под ним таймкод и `кадр 1025 из 3250`. Справа поля: файл, начало, конец, длина, режим.
-- Под ними таймлайн на всю ширину: `[` и `]` это границы отрезка (охра), `━` между ними (лёд), `◆` курсор (охра). Подписи `i 00:38` и `o 01:12` под границами.
-- Команда внизу пересобирается при каждом движении: `ffmpeg -ss 00:00:38 -to 00:01:12 -i lecture_04.mov -c copy lecture_04_cut.mov`.
-- Клавиши: `←→` ±1 с, `⇧←→` ±10 с, `, .` по кадру, `i` начало, `o` конец, `enter` вырезать, `esc` выход.
+- **fast** copies the stream. No re-encoding, but a copy can only start on a keyframe.
+- **exact** re-encodes. The edge is clean and it takes longer.
 
-### Режимы «быстро» и «точно»
-
-- **Быстро:** `-c copy`, без перекодирования. Резка идёт по ключевым кадрам, поэтому начало может уехать на несколько секунд назад.
-- **Точно:** перекодирование, граница ровная, но дольше.
-
-На экране результата сдвиг показан явно: в строке «получилось» новое начало красным (`00:00:36` вместо выбранного `00:00:38`), ниже объяснение и клавиша `t`, чтобы вырезать точно.
-
-### Без графики
-
-Если терминал не умеет картинки, кадр рисуется полублоками. Всё остальное на экране то же самое.
-
-## Реализация (наброски)
-
-- Кадр для превью: `ffmpeg -ss T -i файл -frames:v 1 -f image2pipe -vcodec png -`. Кадры кэшировать, при быстром движении брать уменьшенные (`-vf scale=480:-1`).
-- Показ картинки: крейт `ratatui-image`, он сам определяет протокол при старте и умеет откат на полублоки.
-- Ключевые кадры: `ffprobe -v error -select_streams v:0 -skip_frame nokey -show_entries frame=pts_time -of csv=p=0 файл`. Нужны, чтобы знать, куда сдвинется начало в быстром режиме.
-- Точный режим: вместо `-c copy` перекодировать, например `-c:v libx264 -c:a aac`.
-- `build_args()` стоит сделать так, чтобы он возвращал пары «текст аргумента и номер поля»: тогда превью красит и подчёркивает нужные куски.
-- Крейты сейчас: `ratatui`, `crossterm`. Для редактирования полей с курсором потом `tui-input`.
-
-## Открытые вопросы
-
-- Где обычно лежат видео: у тебя локально или на сервере по ssh? От этого зависит, хватит ли варианта с mpv.
-- Показывать ли сдвиг начала до запуска (по ключевым кадрам), а не только после.
-- Какие операции делать после «сжать» и «вырезать»: «gif», «звук», «ресайз».
-- Нужен ли режим без TUI: на холсте в `--help` нарисованы `--print` и `-y`, но это пока не решено.
-- Пресеты в TOML (`~/.config/.../presets.toml`) или обойтись зашитыми.
-
-## Идеи на потом
-
-- Новые операции по тому же шаблону: «gif», «звук», «ресайз».
-- Пресеты в TOML.
-- Точный прогресс для «вырезать»: считать от длины куска, а не всего файла.
-- Редактирование полей с курсором через `tui-input`.
-- Определение truecolor и переключение на ANSI-16.
+The design assumed that a fast cut always starts earlier than asked. Testing showed it depends on the container; see [architecture.md](architecture.md#keyframes-and-fast-cuts). The principle stays: kadr says what will happen before the run and reports what did happen after it.

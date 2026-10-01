@@ -1,47 +1,45 @@
-# kadr: выпуск и Homebrew
+# kadr: releases and Homebrew
 
-Цель: `brew install OWNER/tap/kadr` ставит kadr и вместе с ним ffmpeg.
+The goal: `brew install yand3r3d3v/tap/kadr` installs kadr and ffmpeg with it.
 
-Зависимость от ffmpeg задаётся в формуле строкой `depends_on "ffmpeg"`. Homebrew ставит её сам, если её ещё нет. Шаблон формулы лежит в [packaging/homebrew/kadr.rb](../packaging/homebrew/kadr.rb).
+The dependency is one line in the formula, `depends_on "ffmpeg"`; Homebrew installs it if it is not there yet. The formula template is [packaging/homebrew/kadr.rb](../packaging/homebrew/kadr.rb).
 
-## Чего не хватает до первой установки
+## What is missing before the first install
 
-1. Репозиторий на GitHub. Сейчас он только локальный.
-2. Лицензия. Без файла `LICENSE` формулу в свой tap положить можно, но так не принято. Какую лицензию взять, решаешь ты.
-3. Тег версии и архив с исходниками, на который будет ссылаться формула.
-4. Tap: отдельный репозиторий с именем `homebrew-tap` (или любым другим, начинающимся с `homebrew-`).
+1. A version tag, and with it the source tarball the formula points at.
+2. A tap: a separate repository named `homebrew-tap` (any name starting with `homebrew-` works).
 
-## Шаги первого выпуска
+## First release
 
-1. Отправить код на GitHub, поставить тег:
+1. Tag the version and push the tag:
    ```bash
-   git tag v0.1.0 && git push origin main v0.1.0
+   git tag v0.1.0 && git push origin v0.1.0
    ```
-2. Посчитать сумму архива, который GitHub собирает для тега:
+2. Take the checksum of the tarball GitHub builds for the tag:
    ```bash
-   curl -sL https://github.com/OWNER/kadr/archive/refs/tags/v0.1.0.tar.gz | shasum -a 256
+   curl -sL https://github.com/yand3r3d3v/kadr/archive/refs/tags/v0.1.0.tar.gz | shasum -a 256
    ```
-3. В формуле заменить `OWNER` и `REPLACE_WITH_SHA256_OF_THE_TARBALL`.
-4. Создать репозиторий `OWNER/homebrew-tap`, положить формулу в `Formula/kadr.rb`.
-5. Проверить:
+3. Put it into the formula in place of `REPLACE_WITH_SHA256_OF_THE_TARBALL`.
+4. Create the repository `yand3r3d3v/homebrew-tap` and put the formula at `Formula/kadr.rb`.
+5. Check it:
    ```bash
-   brew install OWNER/tap/kadr && brew test kadr
+   brew install yand3r3d3v/tap/kadr && brew test kadr
    ```
 
-До первого тега можно ставить прямо из ветки: `brew install --HEAD OWNER/tap/kadr`. Для этого достаточно шагов 3 и 4, сумма архива не нужна.
+Before the first tag kadr can be installed straight from the branch with `brew install --HEAD yand3r3d3v/tap/kadr`. That needs only step 4; no checksum.
 
-## Следующие выпуски
+## Later releases
 
-Поднять `version` в `Cargo.toml`, поставить тег, обновить в формуле `url` и `sha256`. Когда надоест делать это руками, шаги 2 и 3 автоматизируются одним workflow в GitHub Actions на событие тега.
+Raise `version` in `Cargo.toml`, tag, and update `url` and `sha256` in the formula. Once that gets tedious, steps 2 and 3 fit in one GitHub Actions workflow triggered by a tag.
 
-## Что формула проверяет
+## What the formula tests
 
-Блок `test` запускает `kadr --version` и собирает команду для минутного тестового ролика через `kadr compress in.mp4 --print`. Это проверяет сразу и kadr, и то, что ffprobe из зависимости находится.
+The `test` block runs `kadr --version`, then makes a one-second clip and asks for `kadr compress in.mp4 --print`. That checks kadr itself and that the `ffprobe` from the dependency is found.
 
-## Без Homebrew
+## Without Homebrew
 
 ```bash
-cargo install --path .
+cargo install --git https://github.com/yand3r3d3v/kadr
 ```
 
-ffmpeg в этом случае ставится отдельно. Если его нет, kadr скажет об этом при запуске.
+ffmpeg is installed separately in this case. If it is missing, kadr says so when it starts.
